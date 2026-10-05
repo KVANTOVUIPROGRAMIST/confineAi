@@ -10,6 +10,9 @@ Path('tmp').mkdir(exist_ok=True)
 os.environ['DATABASE_URL'] = f'sqlite:///./tmp/test-{uuid.uuid4().hex}.db'
 os.environ['APP_ENV'] = 'development'
 os.environ['BETA_ENABLED'] = 'true'
+# Local setup must never turn offline tests into paid provider or billing calls.
+for credential in ('GEMINI_API_KEY', 'OPENAI_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'):
+    os.environ[credential] = ''
 
 from app import main
 from app.auth import limiter

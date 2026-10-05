@@ -2,6 +2,8 @@
 
 A course-grounded study app, built first for UC San Diego. Students select a class, approve prerequisite references, add private materials, ask for explanations, and upload an assignment to generate a cited PDF solution document.
 
+Live beta: https://confine-7ur2.onrender.com. The deployed service uses the `codex/ucsd-beta` branch in https://github.com/KVANTOVUIPROGRAMIST/confineAi. Manage hosting at https://dashboard.render.com/web/srv-db22fqks728c73ar9rv0 and the private 1 GB database at https://dashboard.render.com/d/dpg-db22co8m7kps73d7g4a0-a. The deployment was created through the Render integration; the Blueprint is also provided for repeatable setup.
+
 ## What works
 
 - Account registration and login with hashed passwords, expiring HttpOnly sessions, CSRF protection, and per-account data isolation.

@@ -30,8 +30,10 @@ services:
 
 databases:
   - name: confine-db
-    plan: basic-256mb
+    plan: 0.1c-256mb
+    diskSizeGB: 1
+    ipAllowList: []
     region: oregon
-    databaseName: confine
-    user: confine
+    databaseName: confine_db
+    user: confine_db_user
     postgresMajorVersion: "17"
