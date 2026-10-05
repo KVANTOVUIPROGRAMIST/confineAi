@@ -272,6 +272,22 @@ def test_pdf_escapes_markup_and_wraps_long_content():
     assert '<script>' in ''.join(p.extract_text() for p in reader.pages)
 
 
+def test_later_questions_receive_shared_problem_data_in_draft_and_review(client, student, monkeypatch):
+    course = enroll(client)
+    mock_ai(monkeypatch)
+    original = providers.generate
+    contexts = []
+    def capture(schema, instructions, content, **kwargs):
+        contexts.append(json.loads(content)['assignment_context'])
+        return original(schema, instructions, content, **kwargs)
+    monkeypatch.setattr(providers, 'generate', capture)
+    questions = ['1. Flip a fair coin independently three times.', '2. For the same experiment, find the expected number of heads.']
+    with SessionLocal() as db:
+        answer, _ = pipeline.solve(db, db.get(Enrollment, course['id']), questions[1], assignment_context=questions)
+    assert answer['status'] == 'answered'
+    assert contexts == [questions, questions]
+
+
 def test_beta_disables_checkout_even_with_stripe_keys(client, student, monkeypatch):
     monkeypatch.setattr(settings, 'stripe_key', 'fake')
     monkeypatch.setattr(settings, 'stripe_price', 'price_student')

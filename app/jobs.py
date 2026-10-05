@@ -38,7 +38,8 @@ def process_assignment(assignment_id):
             for index, question in enumerate(assignment.questions):
                 if index < len(assignment.results):
                     continue
-                answer, tokens = solve(db, enrollment, question, source_snapshot=assignment.source_snapshot)
+                answer, tokens = solve(db, enrollment, question, source_snapshot=assignment.source_snapshot,
+                                       assignment_context=assignment.questions)
                 input_tokens += tokens[0]
                 output_tokens += tokens[1]
                 usage.input_tokens, usage.output_tokens = input_tokens, output_tokens
