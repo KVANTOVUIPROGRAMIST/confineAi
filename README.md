@@ -34,7 +34,7 @@ For a first test, create a Gemini API key at https://aistudio.google.com/apikey 
 
 ```dotenv
 AI_PROVIDER=gemini
-AI_MODEL=gemini-3.8-flash
+AI_MODEL=gemini-3.5-flash-lite
 GEMINI_API_KEY=your-key
 ```
 
