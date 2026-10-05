@@ -1,0 +1,11 @@
+Confine demo notes — original sample, not UCSD instructor material.
+
+Use only the binomial model described here for the sample assignment.
+A binomial random variable X counts successes in n independent trials.
+Each trial has exactly two outcomes and the same success probability p.
+For integer k with 0 <= k <= n:
+P(X = k) = C(n,k) * p^k * (1-p)^(n-k).
+C(n,k) = n! / (k! * (n-k)!).
+The expected number of successes is E[X] = n*p.
+For n=3 and k=2, C(3,2) = 3.
+Do not use a normal approximation or another probability distribution.

@@ -1,0 +1,11 @@
+Confine demo assignment — original sample for testing the app.
+Show all steps using the uploaded demo notes. Do not use approximations.
+
+1. A fair coin is flipped independently three times. Let X count heads.
+Compute P(X = 2), and state the assumptions needed for the binomial model.
+
+2. In the same experiment, compute E[X].
+
+3. Explain a normal approximation and calculate its probability estimate.
+This question deliberately requests a method absent from the demo notes;
+the app should ask for supporting material instead of solving it.
