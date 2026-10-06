@@ -156,7 +156,7 @@ def test_latex_and_native_word_equations_preserve_math_without_private_notes(tmp
     markdown = typesetting.markdown_document('Homework', course, results, 'Student', 'rebuild')
     latex = typesetting.latex_document(markdown)
     assert r'\binom' in latex and r'\frac' in latex and 'PRIVATE-NOTE' not in latex
-    assert markdown.index('Choose two') < markdown.index('**Solution**')
+    assert markdown.index('Choose two') < markdown.index('**Response**')
     assert 'Choose two' not in typesetting.markdown_document('Homework', course, results, '', 'new')
     path = tmp_path / 'math.docx'
     typesetting.pandoc(markdown, 'docx', outputfile=str(path))
@@ -370,3 +370,66 @@ def test_layout_with_missing_or_reordered_subparts_cannot_be_accepted(client, st
         submissions.complete_assignment(db, db.get(Enrollment, course['id']),
             SimpleNamespace(name='hw.txt', mime='text/plain', data=b'Question a.', pages=1), [], 30)
     assert calls == [submissions.CompletedDocument, submissions.DocumentCheck]*2
+
+
+def test_single_essay_response_has_no_artificial_question_heading():
+    course = SimpleNamespace(code='MMW 122', title='Exploring the Modern World')
+    response = 'An opening paragraph.\n\nAn argument with evidence.\n\nA conclusion.'
+    results = [{'label': '1', 'question': 'Write a short essay.', 'answer': {'final_answer': response}}]
+    markdown = typesetting.markdown_document('Essay', course, results, 'Student', 'new')
+    assert '## 1' not in markdown and '**Response**' not in markdown
+    assert 'Write a short essay.' not in markdown and response in markdown
+    with_prompts = typesetting.markdown_document('Essay', course, results, 'Student', 'rebuild')
+    assert 'Write a short essay.' in with_prompts and '**Response**' in with_prompts
+
+
+@pytest.mark.parametrize('source, expected', [
+    (r'An equation \(x^2=4\).', r'An equation $x^2=4$.'),
+    (r'\[\frac{1}{2}\]', r'$$\frac{1}{2}$$'),
+    (r'$$\begin{align*}x&=1\\y&=2\end{align*}$$', r'$$\begin{aligned}x&=1\\y&=2\end{aligned}$$'),
+    (r'$$\begin{gather}x=1\\y=2\end{gather}$$', r'$$\begin{gathered}x=1\\y=2\end{gathered}$$'),
+    (r'$$\begin{equation}x=1\end{equation}$$', r'$$x=1$$'),
+])
+def test_common_math_wrappers_preserve_formulas_and_pass_validation(source, expected):
+    assert typesetting.normalize_math(source) == expected
+    assert typesetting.normalize_math(expected) == expected
+    typesetting.validate_markdown(source)
+
+
+def test_math_normalization_leaves_program_strings_and_unsafe_commands_unchanged():
+    code = '```python\n' + r'print("\[x\]", "$$\begin{align}x=1\end{align}$$")' + '\n```'
+    assert typesetting.normalize_math(code) == code
+    inline = '`' + r'\(x\)' + '`'
+    assert typesetting.normalize_math(inline) == inline
+    with pytest.raises(typesetting.TypesetError):
+        typesetting.validate_markdown(r'\[\input{private}\]')
+
+
+def test_format_repair_feedback_identifies_all_invalid_fields(client, student, monkeypatch):
+    course = enroll(client)
+    calls = []
+    malformed = draft(r'$\unsupportedA{x}$')
+    malformed.sections[0].display_question = r'$\unsupportedB{y}$'
+    def generate(schema, instructions, content, **kwargs):
+        payload = json.loads(content)
+        calls.append((schema, payload))
+        if schema is submissions.CompletedDocument:
+            return (draft() if 'format_feedback' in payload else malformed), (10, 5)
+        if schema is submissions.DocumentCheck:
+            return check(), (10, 5)
+        return submissions.ReasoningCheck(correct=True, course_supported=False, replacement_solution='', assumptions=[], concerns=[]), (10, 5)
+    monkeypatch.setattr(providers, 'generate', generate)
+    with SessionLocal() as db:
+        results, _, _ = submissions.complete_assignment(db, db.get(Enrollment, course['id']),
+            SimpleNamespace(name='hw.txt', mime='text/plain', data=b'Question a.', pages=1), [], 30)
+    repair = next(payload for schema, payload in calls if 'format_feedback' in payload)
+    assert 'section 1 display_question' in repair['format_feedback']
+    assert 'section 1 solution' in repair['format_feedback']
+    assert 'unsupportedA' in repair['format_feedback'] and 'unsupportedB' in repair['format_feedback']
+    assert results[0]['answer']['status'] == 'answered'
+
+
+def test_valid_row_break_before_variable_is_not_an_unknown_tex_command():
+    typesetting.validate_markdown(r'$$\begin{aligned}x&=1\\y&=2\end{aligned}$$')
+    with pytest.raises(typesetting.TypesetError):
+        typesetting.validate_markdown(r'$$\begin{aligned}x&=1\\\input{private}\end{aligned}$$')

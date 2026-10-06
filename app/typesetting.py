@@ -32,9 +32,16 @@ MATH_COMMANDS = set(r'''frac dfrac tfrac cfrac binom dbinom tbinom sqrt sum prod
 MATH_ENVIRONMENTS = {'aligned', 'alignedat', 'gathered', 'split', 'cases', 'matrix', 'pmatrix', 'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix', 'array', 'smallmatrix'}
 
 
+def tex_commands(text):
+    # Consume control symbols as complete tokens. In \\y, the two backslashes
+    # are a row break followed by variable y, rather than an unknown \y macro.
+    return {m.group(1) for m in re.finditer(r'\\(?:([a-zA-Z]+)|[^a-zA-Z])', text) if m.group(1)}
+
+
 class TypesetError(HTTPException):
-    def __init__(self, detail='The LaTeX document could not be compiled. Retry the saved file; your allowance was restored.'):
+    def __init__(self, detail='The LaTeX document could not be compiled. Retry the saved file; your allowance was restored.', reason='compile_failed'):
         super().__init__(502, detail)
+        self.reason = reason
 
 
 def compiler():
@@ -76,8 +83,19 @@ def pandoc(text, to, extra_args=None, outputfile=None):
 
 
 def normalize_math(text):
-    """Repair a mismatched single-dollar display terminator; never alter math content."""
+    """Normalize common math wrappers without changing formulas or code."""
     text = text.replace('\r\n', '\n')
+    # Models also emit standard TeX delimiters. Convert only outside existing
+    # dollar mathematics and code, preserving every expression verbatim.
+    opaque = r'(?ms)(^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\2\s*$|`[^`\n]*`|\$\$.*?\$\$|(?<!\\)\$(?:\\.|[^$])*?\$)'
+    cursor, converted = 0, []
+    def delimiters(prose):
+        prose = re.sub(r'\\\[(.*?)\\\]', lambda m: '$$' + m.group(1) + '$$', prose, flags=re.S)
+        return re.sub(r'\\\((.*?)\\\)', lambda m: '$' + m.group(1) + '$', prose, flags=re.S)
+    for match in re.finditer(opaque, text):
+        converted.extend((delimiters(text[cursor:match.start()]), match.group()))
+        cursor = match.end()
+    text = ''.join(converted) + delimiters(text[cursor:])
     protected = [(m.start(), m.end()) for m in re.finditer(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$|`[^`\n]*`', text)]
     # Some structured responses double-escape paragraph breaks. Preserve literal
     # escapes in programs and TeX commands (such as \nabla), correcting only clear
@@ -106,17 +124,30 @@ def normalize_math(text):
         elif token == state:
             state = None
         else:
-            raise TypesetError('The generated mathematics has mismatched delimiters.')
+            raise TypesetError('The generated mathematics has mismatched delimiters.', 'math_delimiters')
     if state:
-        raise TypesetError('The generated mathematics has an unclosed formula.')
+        raise TypesetError('The generated mathematics has an unclosed formula.', 'math_delimiters')
     for start, end, replacement in reversed(changes):
         text = text[:start] + replacement + text[end:]
-    return text
+    # Top-level equation environments are invalid inside dollar mathematics.
+    # Use their inner-math equivalents without changing any formula or row.
+    def inner_environment(match):
+        token, formula = match.group(1), match.group(2)
+        outer = re.fullmatch(r'\s*\\begin\{(align\*?|gather\*?|equation\*?|displaymath)\}(.*?)\\end\{\1\}\s*', formula, re.S)
+        if outer:
+            environment, body = outer.groups()
+            inner = {'align': 'aligned', 'gather': 'gathered'}.get(environment.rstrip('*'))
+            formula = ('\\begin{' + inner + '}' + body + '\\end{' + inner + '}') if inner else body
+        return token + formula + token
+    # Code remains opaque, including inline programs with dollar signs.
+    protected = [(m.start(), m.end()) for m in re.finditer(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$|`[^`\n]*`', text)]
+    return re.sub(r'(\$\$|(?<![\\$])\$)(.*?)(?<!\\)\1',
+                  lambda m: m.group() if any(a <= m.start() < b for a, b in protected) else inner_environment(m), text, flags=re.S)
 
 
 def validate_markdown(text):
     if len(text) > 300_000:
-        raise TypesetError('The generated document exceeds the formatting limit.')
+        raise TypesetError('The generated document exceeds the formatting limit.', 'format_size')
     text = normalize_math(text)
     tree = json.loads(pandoc(text, 'json'))
 
@@ -124,22 +155,22 @@ def validate_markdown(text):
         if isinstance(node, dict):
             kind = node.get('t')
             if kind in ('Image', 'RawBlock', 'RawInline'):
-                raise TypesetError('The generated document contains unsupported embedded content.')
+                raise TypesetError('The generated document contains unsupported embedded content.', 'embedded_content')
             if kind in ('Code', 'CodeBlock', 'Math'):
                 if kind != 'Math':
                     return
-            if kind == 'Str' and set(re.findall(r'\\([a-zA-Z]+)', node['c'])) & MATH_COMMANDS:
-                raise TypesetError('Wrap every LaTeX formula in $...$ or $$...$$, including question statements.')
+            if kind == 'Str' and tex_commands(node['c']) & MATH_COMMANDS:
+                raise TypesetError('Wrap every LaTeX formula in $...$ or $$...$$, including question statements.', 'math_unwrapped')
             if kind == 'Math':
                 math = node['c'][1]
                 if '^^' in math or '\x00' in math or re.search(r'(?<!\\)%', math):
-                    raise TypesetError('The generated mathematics contains unsafe formatting.')
-                commands = re.findall(r'\\([a-zA-Z]+)', math)
-                if set(commands) - MATH_COMMANDS:
-                    raise TypesetError('The generated mathematics uses an unsupported LaTeX command.')
+                    raise TypesetError('The generated mathematics contains unsafe formatting.', 'math_unsafe')
+                commands = tex_commands(math)
+                if commands - MATH_COMMANDS:
+                    raise TypesetError('The generated mathematics uses an unsupported LaTeX command: ' + ', '.join(sorted(commands - MATH_COMMANDS)) + '.', 'math_command')
                 for env in re.findall(r'\\(?:begin|end)\s*\{([^}]+)\}', math):
                     if env not in MATH_ENVIRONMENTS:
-                        raise TypesetError('The generated mathematics uses an unsupported LaTeX environment.')
+                        raise TypesetError('The generated mathematics uses an unsupported LaTeX environment.', 'math_environment')
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -179,7 +210,7 @@ def document_blocks(title, course, results, student_name='', layout='rebuild'):
     def add(text, role='text', region=None, owners=None):
         blocks.append({'text': text, 'role': role, 'region': region, 'owners': owners or []})
     if metadata and (metadata['header'].strip() or metadata['preamble'].strip()):
-        add(metadata['header'] + '\n\n' + metadata['preamble'], 'header', metadata.get('header_region'))
+        add(normalize_math(metadata['header'] + '\n\n' + metadata['preamble']), 'header', metadata.get('header_region'))
     else:
         add(f'# {literal(title)}\n\n' + literal(f'{course.code} - {course.title}'), 'header')
     if student_name:
@@ -211,15 +242,16 @@ def document_blocks(title, course, results, student_name='', layout='rebuild'):
                 if label == single_figure_owner:
                     for region in group.get('figures', []):
                         add('', 'figure', region, [label])
-                add('**Solution**\n\n' + solution_spacing(result['answer']['final_answer']), 'solution')
+                add('**Response**\n\n' + solution_spacing(result['answer']['final_answer']), 'solution')
         return blocks
     for result in results:
-        add('## ' + literal(result['label']), 'part')
+        if layout == 'rebuild' or len(results) > 1:
+            add('## ' + literal(result['label']), 'part')
         if layout == 'rebuild':
             add(normalize_math(result['question']), 'question')
             if result.get('uses_diagram'):
                 add('*The original figure is reproduced in the assignment appendix.*')
-        add(('**Solution**\n\n' if layout == 'rebuild' else '') + solution_spacing(result['answer']['final_answer']), 'solution')
+        add(('**Response**\n\n' if layout == 'rebuild' else '') + solution_spacing(result['answer']['final_answer']), 'solution')
     return blocks
 
 
@@ -423,7 +455,7 @@ def format_word(path, images, roles=None):
             continue
         if paragraph.style.name.startswith('Heading'):
             in_question = True
-        if paragraph.text.strip() == 'Solution':
+        if paragraph.text.strip() in ('Response', 'Solution'):
             in_question = False
             paragraph.paragraph_format.keep_with_next = True
         elif in_question:

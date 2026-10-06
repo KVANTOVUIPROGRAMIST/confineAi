@@ -158,6 +158,7 @@ def process_assignment(assignment_id, owner=None):
             db.rollback()
             return
         except Exception as exc:
+            failed_stage = assignment.file.stage if assignment.file else 'questions'
             db.rollback()
             try:
                 guard()
@@ -178,7 +179,10 @@ def process_assignment(assignment_id, owner=None):
             assignment.error = exc.detail if isinstance(exc, HTTPException) else 'The assignment could not finish. Unused responses have been restored.'
             db.commit()
             # Keep provider errors out of logs; they can contain sensitive input.
-            log.warning('Assignment %s failed (%s)', assignment_id, type(exc).__name__)
+            # Stage and fixed diagnostic codes distinguish model failures from
+            # formatting failures without retaining prompts or compiler output.
+            log.warning('Assignment %s failed (%s) stage=%s reason=%s', assignment_id, type(exc).__name__,
+                        failed_stage, getattr(exc, 'reason', 'unknown'))
         consumed = sum(r['answer']['status'] == 'answered' for r in assignment.results)
         settle(db, assignment.usage_id, consumed, assignment.id, input_tokens, output_tokens)
         if owner:
