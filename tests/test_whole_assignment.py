@@ -110,6 +110,40 @@ def test_scanned_pdf_reaches_both_model_calls_as_original_bytes(client, student,
     assert all('text' not in call['context']['assignment_file'] for call in calls)
 
 
+def test_undocumented_named_theorem_is_withheld_even_when_reviewer_accepts_it(client, student, monkeypatch):
+    course = enroll(client)
+    draft = whole_draft()
+    draft.sections[0].answer.final_answer = "Using Burnside's Lemma, divide the number of colorings by 12."
+    # All citation IDs are valid, but a valid binomial citation cannot authorize this theorem.
+    calls = mock_whole_model(monkeypatch, draft=draft)
+    results, _ = solve_file(course, text_file())
+    assert results[0]['answer']['status'] == 'needs_materials'
+    assert "Burnside's Lemma" in results[0]['answer']['summary']
+    assert results[0]['answer']['final_answer'] == ''
+    assert calls[1]['context']['proposed_sections'][0]['answer']['status'] == 'needs_materials'
+    assert results[1]['answer']['status'] == 'answered'
+
+
+def test_named_method_requires_documentation_in_the_actual_cited_source():
+    answer = whole_draft().sections[0].answer
+    answer.final_answer = "Using Bayes' Theorem, compute the posterior."
+    sources = [
+        {'id': 'ref-binomial', 'title': 'Binomial', 'text': 'A binomial distribution describes independent trials.'},
+        {'id': 'bayes', 'title': 'Conditional probability', 'text': "Bayes' theorem computes a posterior using conditional probabilities."},
+    ]
+    assert not pipeline.validate_evidence(answer, sources)
+    answer.source_ids = ['bayes']
+    answer.steps[0].source_ids = ['bayes']
+    assert pipeline.validate_evidence(answer, sources)
+
+
+def test_documented_basic_rule_and_generic_theorem_references_are_not_blocked():
+    answer = whole_draft().sections[0].answer
+    answer.final_answer = 'Using the Product Rule, multiply the choices. This theorem is applied to the given values.'
+    sources = [{'id': 'ref-binomial', 'title': 'Counting', 'text': 'The product rule counts choices by multiplication.'}]
+    assert pipeline.validate_evidence(answer, sources)
+
+
 @pytest.mark.parametrize('review', [
     whole_review(coverage_complete=False),
     whole_review(sections=[SectionVerification(index=0, supported=True, concerns=[])]),
