@@ -78,6 +78,12 @@ def normalize_math(text):
     """Repair a mismatched single-dollar display terminator; never alter math content."""
     text = text.replace('\r\n', '\n')
     protected = [(m.start(), m.end()) for m in re.finditer(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$|`[^`\n]*`', text)]
+    # Some structured responses double-escape paragraph breaks. Preserve literal
+    # escapes in programs and TeX commands (such as \nabla), correcting only clear
+    # paragraph/list/formula separators outside code.
+    text = re.sub(r'\\n(?=[A-Z0-9$\\\s-]|$)',
+                  lambda m: m.group() if any(a <= m.start() < b for a, b in protected) else '\n', text)
+    protected = [(m.start(), m.end()) for m in re.finditer(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$|`[^`\n]*`', text)]
     changes, state = [], None
     for match in re.finditer(r'\${1,2}', text):
         if any(start <= match.start() < end for start, end in protected):
@@ -118,6 +124,11 @@ def validate_markdown(text):
             kind = node.get('t')
             if kind in ('Image', 'RawBlock', 'RawInline'):
                 raise TypesetError('The generated document contains unsupported embedded content.')
+            if kind in ('Code', 'CodeBlock', 'Math'):
+                if kind != 'Math':
+                    return
+            if kind == 'Str' and set(re.findall(r'\\([a-zA-Z]+)', node['c'])) & MATH_COMMANDS:
+                raise TypesetError('Wrap every LaTeX formula in $...$ or $$...$$, including question statements.')
             if kind == 'Math':
                 math = node['c'][1]
                 if '^^' in math or '\x00' in math or re.search(r'(?<!\\)%', math):

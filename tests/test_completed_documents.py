@@ -190,6 +190,19 @@ def test_malformed_display_terminators_are_repaired_without_changing_math_or_cod
         typesetting.normalize_math(r'An unclosed formula $$\frac{1}{2}')
 
 
+def test_double_escaped_paragraphs_are_fixed_but_program_escapes_and_tex_commands_remain():
+    sample = r'Base case:\nLeft side $\nabla f$.\n\nInduction step:\n$$x=1$$'
+    assert typesetting.normalize_math(sample) == 'Base case:\nLeft side $\\nabla f$.\n\nInduction step:\n$$x=1$$'
+    program = '```python\nprint("\\nHello")\n```\n\nLiteral `\\nHello`.'
+    assert typesetting.normalize_math(program) == program
+
+
+def test_unformatted_question_latex_requires_repair_but_literal_code_is_allowed():
+    with pytest.raises(typesetting.TypesetError, match='Wrap every LaTeX formula'):
+        typesetting.validate_markdown(r'Prove: 2+5+8=\frac{n(3n+1)}{2}')
+    typesetting.validate_markdown('Formula: $\\frac{1}{2}$.\n\n```python\nprint("\\frac{1}{2}")\n```')
+
+
 def test_compilation_failure_restores_credits_and_keeps_reported_ai_usage(client, student, monkeypatch):
     course = enroll(client, mode='strict')
     model(monkeypatch)

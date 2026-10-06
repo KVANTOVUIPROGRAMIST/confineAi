@@ -105,7 +105,7 @@ Add a signed webhook endpoint at `/api/billing/webhook` for `invoice.paid`, `che
 node --check static/app.js
 ```
 
-Tests cover authentication/CSRF, cross-account access, retrieval boundaries, citation validation, semantic rejection, credit reservation/refunds/idempotency, original-file forwarding, complete task coverage, bounded recovery of missing subparts and malformed reviews, clean document exports, upload storage/deletion, and payment fulfillment. Repair calls contribute to owner token usage but students are charged only for the final supported sections. Provider calls are mocked during tests; live AI behavior requires a real key and course-specific evaluation.
+Tests cover authentication/CSRF, cross-account access, retrieval boundaries, citation validation, semantic rejection, credit reservation/refunds/idempotency, original-file forwarding, complete task coverage, bounded recovery of missing subparts and malformed reviews, clean document exports, upload storage/deletion, and payment fulfillment. Repair calls contribute to owner token usage; completion jobs consume one response per final section, including solutions beyond supplied sources. Legacy strict jobs consume only supported answers. Provider calls are mocked during tests; live AI behavior requires a real key and course-specific evaluation.
 
 ## Limits before a public launch
 
