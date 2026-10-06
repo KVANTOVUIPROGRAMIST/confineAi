@@ -1,6 +1,6 @@
 # Confine
 
-A course-grounded study app, built first for UC San Diego. Students select a class, approve prerequisite references, add private materials, ask for explanations, and upload an assignment to generate a cited PDF solution document.
+A course-grounded study app, built first for UC San Diego. Students select a class, approve prerequisite references, add private materials, ask for explanations, and upload a whole assignment to generate a formatted PDF, Word, or Markdown answer document.
 
 Live beta: https://confine-7ur2.onrender.com. The deployed service uses the `codex/ucsd-beta` branch in https://github.com/KVANTOVUIPROGRAMIST/confineAi. Manage hosting at https://dashboard.render.com/web/srv-db22fqks728c73ar9rv0 and the private 1 GB database at https://dashboard.render.com/d/dpg-db22co8m7kps73d7g4a0-a. The deployment was created through the Render integration; the Blueprint is also provided for repeatable setup.
 
@@ -12,10 +12,10 @@ Live beta: https://confine-7ur2.onrender.com. The deployed service uses the `cod
 - Class-material mode is the default; original Confine reference packs require opting into catalog mode. Catalog mode with original Confine reference material; class-material mode with uploads and explicitly approved prerequisite references.
 - Private PDF/TXT/Markdown uploads, plus provider transcription for images and scanned PDFs. Stored passages retain page numbers.
 - Retrieval restricted by account and course, generated steps with passage IDs, citation validation, and a separate semantic evidence check. No web tools, external retrieval, or uploaded-code execution are enabled in tutoring requests.
-- Assignment preview with editable questions; durable single-worker processing; source snapshots; progress; PDF and editable Markdown downloads. Unsupported questions are marked rather than given fabricated solutions.
-- Free beta: 300 monthly responses. One supported chat answer or assignment question consumes one response. Reservations prevent overspending; unsupported results and technical failures refund unused responses.
+- Whole-file assignment generation: the original PDF/image goes directly to Gemini, and TXT/Markdown is sent intact. No transcription or question-detection pass gates generation. Both answering and review receive the entire file, preserving shared instructions, diagrams, original numbering, and subparts. A coverage check accounts for every task and independently checks source support. Clean PDF, editable Word, and Markdown exports contain final working/prose/code; source audits remain in the app. Missing support produces an explicitly incomplete draft. Old text-only drafts remain accessible and can be re-uploaded into the new flow.
+- Free beta: 300 monthly responses. One supported chat answer or assignment answer section consumes one response. Whole-file jobs reserve up to 30 available responses and refund unused/unsupported sections. Assignments support up to 30 answer sections. Subparts can be grouped or separately labeled; every supported output section uses one response. A document needing more responses than the reservation fails without consuming the allowance.
 - Stripe subscription/top-up integration is implemented but disabled during beta. Planned Student plan is $15/month for 300 responses; $5 top-up adds 100 responses.
-- Render Blueprint with managed PostgreSQL. All durable student data and generated PDFs live in the database; no persistent disk is required.
+- Render Blueprint with managed PostgreSQL. Private original assignment files, source snapshots, results, and PDFs live in the database; no persistent disk is required. Original files share the 100 MB account upload allowance and are removed with assignment/account deletion. The additive `assignment_files` table requires no alteration to existing assignment rows.
 
 ## Run locally
 
@@ -28,7 +28,7 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open http://localhost:8000. Without an API key, accounts, course selection, text-based uploads, and assignment previews work. The app clearly disables live answer generation until a provider is connected; it never substitutes canned answers for real AI output.
+Open http://localhost:8000. Without an API key, accounts, course selection, and text-based course-material uploads work. The app disables live tutoring and document generation until a provider is connected; it never substitutes canned answers for real AI output.
 
 ### Connect AI
 
@@ -42,7 +42,7 @@ GEMINI_API_KEY=your-key
 
 Restart the server after changing environment variables. Model availability can vary by account. You can choose a supported Gemini model in `AI_MODEL`. Review free-tier limits and data handling at https://ai.google.dev/gemini-api/docs/pricing before uploading sensitive material. Free beta refers to student billing; provider and hosting bills still belong to the app owner.
 
-For OpenAI, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and an appropriate `AI_MODEL` (for example `gpt-6-luna`). Both adapters request structured JSON and omit web/search/code tools. Original file content is sent only for scan/image transcription; tutoring sends selected source passages and the student's question.
+For OpenAI, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and an appropriate `AI_MODEL` (for example `gpt-6-luna`). Both adapters request structured JSON and omit web/search/code tools. Assignment generation and review send the original file and all approved course evidence (up to 400,000 evidence characters; oversize sets are rejected, never silently truncated). Tutoring sends selected source passages and the student's question. Course-material scan/image uploads still use transcription; assignment files bypass it.
 
 ## Deploy to Render
 
@@ -100,10 +100,10 @@ Add a signed webhook endpoint at `/api/billing/webhook` for `invoice.paid`, `che
 node --check static/app.js
 ```
 
-Tests cover authentication/CSRF, cross-account access, retrieval boundaries, citation validation, semantic rejection, credit reservation/refunds/idempotency, assignment exports, and payment fulfillment. Provider calls are mocked during tests; live AI behavior requires a real key and course-specific evaluation.
+Tests cover authentication/CSRF, cross-account access, retrieval boundaries, citation validation, semantic rejection, credit reservation/refunds/idempotency, original-file forwarding, complete task coverage, clean document exports, upload storage/deletion, and payment fulfillment. Provider calls are mocked during tests; live AI behavior requires a real key and course-specific evaluation.
 
 ## Limits before a public launch
 
-This is a working beta, not a guarantee that every generated solution follows an instructor's intended method. Generative checks can miss unsupported reasoning. Keep visible citations and test questions that tempt an advanced shortcut. PDF exports are separately formatted solutions, not a reproduction of the assignment's original layout. Image transcription must be reviewed, especially equations and diagrams.
+This is a working beta, not a guarantee that every generated solution follows an instructor's intended method. Generative checks can miss unsupported reasoning or omitted work. Keep source audits available and test questions that tempt an advanced shortcut. Submission exports are separately formatted answer documents, not filled replicas of the original worksheet; review them before submitting. PDFs were visually checked and Word exports structurally round-tripped; native Word/LibreOffice rendering was unavailable in this development environment.
 
-Add email verification and password recovery before unrestricted public signup. This version uses email/password accounts without an email service. Plan for abuse protection beyond per-process limits, actual storage and token budgets, database backups, and an instructor-reviewed reference library. Student-facing response caps bound question counts; model context/output limits bound individual calls. Provider transcription and preview calls incur owner costs even when no student response is consumed.
+Add email verification and password recovery before unrestricted public signup. This version uses email/password accounts without an email service. Plan for abuse protection beyond per-process limits, actual storage and token budgets, database backups, and an instructor-reviewed reference library. Student-facing response caps bound section counts; model context/output limits bound individual calls. Provider transcription and withheld/failed generation calls can incur owner costs even when no student response is consumed.

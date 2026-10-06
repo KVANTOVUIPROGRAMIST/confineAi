@@ -7,6 +7,16 @@ from fastapi import HTTPException
 from .config import settings
 
 
+def gemini_schema(node):
+    # Bounds on nested arrays can exceed Gemini's schema-complexity budget.
+    # Pydantic still enforces every original bound on the returned response.
+    if isinstance(node, dict):
+        return {key: gemini_schema(value) for key, value in node.items() if key not in ('minItems', 'maxItems')}
+    if isinstance(node, list):
+        return [gemini_schema(value) for value in node]
+    return node
+
+
 def generate(schema, instructions, content, max_tokens=5000, attachment=None):
     """No browsing tools, URL context, code execution, or external retrieval are enabled."""
     if not settings.ai_ready:
@@ -25,7 +35,7 @@ def generate(schema, instructions, content, max_tokens=5000, attachment=None):
                     headers={'x-goog-api-key': settings.gemini_key},
                     json={'systemInstruction': {'parts': [{'text': instructions}]},
                           'contents': [{'role': 'user', 'parts': parts}],
-                          'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': json_schema,
+                          'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': gemini_schema(json_schema),
                                                'maxOutputTokens': max_tokens}})
                 response.raise_for_status()
                 data = response.json()

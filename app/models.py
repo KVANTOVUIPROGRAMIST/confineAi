@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
@@ -121,6 +121,20 @@ class Assignment(Base):
     usage_id: Mapped[str | None] = mapped_column(ForeignKey('usage.id'), nullable=True)
     pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    file: Mapped['AssignmentFile | None'] = relationship(cascade='all, delete-orphan', uselist=False)
+
+
+class AssignmentFile(Base):
+    """Original private upload; a separate table keeps existing deployments migration-safe."""
+    __tablename__ = 'assignment_files'
+    assignment_id: Mapped[str] = mapped_column(ForeignKey('assignments.id', ondelete='CASCADE'), primary_key=True)
+    name: Mapped[str] = mapped_column(String(180))
+    mime: Mapped[str] = mapped_column(String(80))
+    data: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    size: Mapped[int] = mapped_column(Integer)
+    pages: Mapped[int] = mapped_column(Integer)
+    student_name: Mapped[str] = mapped_column(String(80), default='')
+    stage: Mapped[str] = mapped_column(String(20), default='queued')
 
 
 class BillingEvent(Base):

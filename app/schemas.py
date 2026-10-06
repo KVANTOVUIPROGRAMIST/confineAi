@@ -26,6 +26,28 @@ class Verification(StrictModel):
     concerns: list[str]
 
 
+class AssignmentSection(StrictModel):
+    label: str
+    question: str
+    answer: Answer
+
+
+class WholeAssignment(StrictModel):
+    sections: list[AssignmentSection] = Field(min_length=1, max_length=30)
+
+
+class SectionVerification(StrictModel):
+    index: int
+    supported: bool
+    concerns: list[str]
+
+
+class WholeVerification(StrictModel):
+    coverage_complete: bool
+    concerns: list[str]
+    sections: list[SectionVerification]
+
+
 class Questions(StrictModel):
     questions: list[str]
 

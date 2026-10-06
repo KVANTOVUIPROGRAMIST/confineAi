@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 from contextlib import asynccontextmanager
@@ -19,8 +20,9 @@ from .config import ROOT, settings
 from .credits import month_key, refresh_allowance, reserve, settle
 from .db import Base, SessionLocal, engine, get_db
 from .documents import extract_file, extract_questions
+from .assignment_files import validate_assignment_file
 from .jobs import assignment_worker, recover_reservations
-from .models import Assignment, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
+from .models import Assignment, AssignmentFile, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
 from .schemas import AssignmentDraft, AssignmentRun, AuthInput, ChatInput, EnrollmentInput
 
 
@@ -86,9 +88,13 @@ def enrollment_dict(db, item):
 
 
 def assignment_dict(item, include_results=True):
+    original = item.file
     return {'id': item.id, 'enrollment_id': item.enrollment_id, 'title': item.title, 'questions': item.questions,
             'status': item.status, 'progress': len(item.results), 'results': item.results if include_results else [],
-            'error': item.error, 'download_ready': bool(item.pdf), 'created_at': item.created_at.isoformat() + 'Z'}
+            'error': item.error, 'download_ready': bool(item.pdf), 'created_at': item.created_at.isoformat() + 'Z',
+            'whole_file': bool(original), 'stage': original.stage if original else item.status,
+            'file': {'name': original.name, 'pages': original.pages, 'size': original.size} if original else None,
+            'submission_ready': item.status == 'completed' and bool(item.pdf)}
 
 
 def ensure_ai():
@@ -245,14 +251,21 @@ async def read_upload(file):
     return data
 
 
+def stored_upload_bytes(db, user_id):
+    materials = db.scalar(select(func.coalesce(func.sum(Document.size), 0)).where(Document.user_id == user_id))
+    assignments = db.scalar(select(func.coalesce(func.sum(AssignmentFile.size), 0)).join(
+        Assignment, Assignment.id == AssignmentFile.assignment_id).where(Assignment.user_id == user_id))
+    return materials + assignments
+
+
 @app.post('/api/materials')
 async def upload_material(enrollment_id: str = Form(...), file: UploadFile = File(...), user=Depends(current_user), db=Depends(get_db)):
     owned_enrollment(db, user.id, enrollment_id)
     limiter.check('upload:' + user.id, 10)
     data = await read_upload(file)
-    size = db.scalar(select(func.coalesce(func.sum(Document.size), 0)).where(Document.user_id == user.id))
+    size = stored_upload_bytes(db, user.id)
     if size + len(data) > settings.max_storage_bytes:
-        raise HTTPException(413, 'Your beta upload allowance is 100 MB. Remove unused material to make room.')
+        raise HTTPException(413, 'Your beta upload allowance is 100 MB. Remove unused materials or assignments to make room.')
     chunks, pages = await asyncio.to_thread(extract_file, file.filename or 'upload', data)
     item = Document(user_id=user.id, enrollment_id=enrollment_id, name=Path(file.filename or 'upload').name[:180],
                     size=len(data), pages=pages, chunks=chunks)
@@ -329,6 +342,58 @@ async def preview_assignment(enrollment_id: str = Form(...), file: UploadFile = 
     return assignment_dict(item)
 
 
+@app.post('/api/assignments/upload')
+async def upload_assignment(enrollment_id: str = Form(...),
+                            request_key: str = Form(..., min_length=16, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$'),
+                            file: UploadFile = File(...), user=Depends(current_user), db=Depends(get_db)):
+    enrollment = owned_enrollment(db, user.id, enrollment_id)
+    data = await read_upload(file)
+    original_name = Path(file.filename or 'assignment.txt').name
+    suffix = Path(original_name).suffix
+    name = original_name if len(original_name) <= 180 else Path(original_name).stem[:180 - len(suffix)] + suffix
+    fingerprint = json.dumps(['whole-file-v1', enrollment_id, name, hashlib.sha256(data).hexdigest()])
+    previous = db.scalar(select(Usage).where(Usage.user_id == user.id, Usage.request_key == request_key))
+    if previous:
+        usage, _ = reserve(db, user, 1, request_key, 'assignment', fingerprint)
+        existing = db.scalar(select(Assignment).where(Assignment.usage_id == usage.id, Assignment.user_id == user.id))
+        if existing:
+            return assignment_dict(existing)
+        raise HTTPException(409, 'This upload request already finished or was interrupted. Start a new upload.')
+    ensure_ai()
+    limiter.check('upload:' + user.id, 10)
+    limiter.check('ai:' + user.id, 10)
+    if db.scalar(select(func.count()).select_from(Assignment).where(Assignment.user_id == user.id)) >= 100:
+        raise HTTPException(422, 'Remove an old assignment before creating another. The beta supports 100 saved assignments.')
+    if db.scalar(select(func.count()).select_from(Assignment).where(Assignment.user_id == user.id, Assignment.status.in_(['queued', 'running']))) >= 2:
+        raise HTTPException(429, 'You can queue up to two assignments at a time.')
+    if stored_upload_bytes(db, user.id) + len(data) > settings.max_storage_bytes:
+        raise HTTPException(413, 'Your beta upload allowance is 100 MB. Remove unused materials or assignments to make room.')
+    mime, pages = await asyncio.to_thread(validate_assignment_file, original_name, data)
+    snapshot = pipeline.available_sources(db, enrollment)
+    pipeline.check_assignment_sources(snapshot)
+    refresh_allowance(db, user)
+    budget = min(settings.max_questions, user.credits + user.topup_credits)
+    if not budget:
+        raise HTTPException(402, 'You have reached your response allowance. Your usage page shows when it resets.')
+    usage, fresh = reserve(db, user, budget, request_key, 'assignment', fingerprint)
+    if not fresh:
+        existing = db.scalar(select(Assignment).where(Assignment.usage_id == usage.id, Assignment.user_id == user.id))
+        if existing:
+            return assignment_dict(existing)
+        raise HTTPException(409, 'This upload is already being submitted. Refresh the assignment list.')
+    try:
+        item = Assignment(user_id=user.id, enrollment_id=enrollment_id, title=Path(name).stem[:180],
+                          questions=[], source_snapshot=snapshot, usage_id=usage.id, status='queued')
+        item.file = AssignmentFile(name=name, mime=mime, data=data, size=len(data), pages=pages, student_name=user.name)
+        db.add(item)
+        db.commit()
+        return assignment_dict(item)
+    except Exception:
+        db.rollback()
+        settle(db, usage.id, 0)
+        raise
+
+
 def checked_questions(questions):
     questions = [q.strip() for q in questions]
     if any(not q or len(q) > 12000 for q in questions) or sum(map(len, questions)) > 45000:
@@ -394,6 +459,22 @@ def download_assignment(assignment_id: str, format: str = 'pdf', user=Depends(cu
     if not item or not item.pdf:
         raise HTTPException(404, 'The completed document is not ready yet.')
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '-', item.title)[:80] or 'assignment'
+    if format not in ('pdf', 'md', 'docx'):
+        raise HTTPException(422, 'Choose PDF, Markdown, or Word document format.')
+    if item.file:
+        from .documents import submission_markdown, submission_docx
+        course = db.get(Course, db.get(Enrollment, item.enrollment_id).course_id)
+        suffix = 'submission' if item.status == 'completed' else 'incomplete-draft'
+        if format == 'md':
+            body = submission_markdown(item.title, course, item.results, item.file.student_name)
+            return Response(body, media_type='text/markdown', headers={'Content-Disposition': f'attachment; filename="{safe_name}-{suffix}.md"'})
+        if format == 'docx':
+            body = submission_docx(item.title, course, item.results, item.file.student_name)
+            return Response(body, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                            headers={'Content-Disposition': f'attachment; filename="{safe_name}-{suffix}.docx"'})
+        return Response(item.pdf, media_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="{safe_name}-{suffix}.pdf"'})
+    if format == 'docx':
+        raise HTTPException(422, 'Word export is available for new whole-file uploads. Re-upload this assignment to use it.')
     if format == 'md':
         blocks = [f'# {item.title}\n\nGenerated with Confine.\n']
         for index, result in enumerate(item.results, 1):

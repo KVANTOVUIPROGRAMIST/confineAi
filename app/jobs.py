@@ -6,9 +6,9 @@ from sqlalchemy import select, update
 
 from .credits import settle
 from .db import SessionLocal
-from .documents import render_assignment
+from .documents import render_assignment, render_submission
 from .models import Assignment, Course, Enrollment, Usage
-from .pipeline import solve
+from .pipeline import solve, solve_whole_assignment
 
 log = logging.getLogger(__name__)
 
@@ -35,23 +35,51 @@ def process_assignment(assignment_id):
         usage = db.get(Usage, assignment.usage_id)
         input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
         try:
-            for index, question in enumerate(assignment.questions):
-                if index < len(assignment.results):
-                    continue
-                answer, tokens = solve(db, enrollment, question, source_snapshot=assignment.source_snapshot,
-                                       assignment_context=assignment.questions)
+            if assignment.file:
+                def stage(value):
+                    assignment.file.stage = value
+                    db.commit()
+                def record_tokens(tokens):
+                    # Keep owner-cost usage even if coverage/source review later rejects the document.
+                    usage.input_tokens += tokens[0]
+                    usage.output_tokens += tokens[1]
+                    db.commit()
+                stage('reading')
+                results, tokens = solve_whole_assignment(db, enrollment, assignment.file,
+                    assignment.source_snapshot, usage.monthly_reserved + usage.topup_reserved, on_stage=stage, on_tokens=record_tokens)
                 input_tokens += tokens[0]
                 output_tokens += tokens[1]
                 usage.input_tokens, usage.output_tokens = input_tokens, output_tokens
-                assignment.results = [*assignment.results, {'question': question, 'answer': answer}]
-                db.commit()
-            assignment.pdf = render_assignment(assignment.title, course, assignment.results)
+                # Export only after checking coverage against the original file and source support.
+                assignment.results = results
+                assignment.questions = [r['question'] for r in results]
+                stage('rendering')
+                assignment.pdf = render_submission(assignment.title, course, results, assignment.file.student_name)
+                assignment.file.stage = 'done'
+            else:
+                for index, question in enumerate(assignment.questions):
+                    if index < len(assignment.results):
+                        continue
+                    answer, tokens = solve(db, enrollment, question, source_snapshot=assignment.source_snapshot,
+                                           assignment_context=assignment.questions)
+                    input_tokens += tokens[0]
+                    output_tokens += tokens[1]
+                    usage.input_tokens, usage.output_tokens = input_tokens, output_tokens
+                    assignment.results = [*assignment.results, {'question': question, 'answer': answer}]
+                    db.commit()
+                assignment.pdf = render_assignment(assignment.title, course, assignment.results)
             assignment.status = 'completed' if all(r['answer']['status'] == 'answered' for r in assignment.results) else 'partial'
             db.commit()
         except Exception as exc:
             db.rollback()
             assignment = db.get(Assignment, assignment_id)
             assignment.status = 'failed'
+            if assignment.file:
+                assignment.file.stage = 'failed'
+                assignment.pdf = None
+                assignment.results = []
+                db.refresh(usage)
+                input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
             assignment.error = exc.detail if isinstance(exc, HTTPException) else 'The assignment could not finish. Unused responses have been restored.'
             db.commit()
             # Keep provider errors out of logs; they can contain sensitive input.
@@ -66,8 +94,10 @@ async def assignment_worker():
             pending = db.scalar(select(Assignment).where(Assignment.status == 'queued').order_by(Assignment.created_at))
             assignment_id = pending.id if pending else None
             if pending:
-                db.execute(update(Assignment).where(Assignment.id == pending.id, Assignment.status == 'queued').values(status='running'))
+                changed = db.execute(update(Assignment).where(Assignment.id == pending.id, Assignment.status == 'queued').values(status='running'))
                 db.commit()
+                if not changed.rowcount:
+                    assignment_id = None
         if assignment_id:
             await asyncio.to_thread(process_assignment, assignment_id)
         else:
