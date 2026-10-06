@@ -5,6 +5,7 @@ import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import stripe
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -22,7 +23,7 @@ from .db import Base, SessionLocal, engine, get_db
 from .documents import extract_file, extract_questions
 from .assignment_files import validate_assignment_file
 from .jobs import assignment_worker, recover_reservations
-from .models import Assignment, AssignmentFile, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
+from .models import Assignment, AssignmentFile, AssignmentOutput, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
 from .schemas import AssignmentDraft, AssignmentRetry, AssignmentRun, AuthInput, ChatInput, EnrollmentInput
 
 
@@ -40,10 +41,18 @@ async def lifespan(app):
             settle(db, usage.id, 0)
         recover_reservations(db)
     worker = asyncio.create_task(assignment_worker())
+    warmup = None
+    if settings.environment == 'production':
+        from .typesetting import warm_typesetter
+        warmup = asyncio.create_task(asyncio.to_thread(warm_typesetter))
     yield
     worker.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await worker
+    if warmup:
+        warmup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warmup
 
 
 app = FastAPI(title='Confine', lifespan=lifespan, docs_url='/api/docs' if settings.environment != 'production' else None,
@@ -91,10 +100,13 @@ def assignment_dict(item, include_results=True):
     original = item.file
     return {'id': item.id, 'enrollment_id': item.enrollment_id, 'title': item.title, 'questions': item.questions,
             'status': item.status, 'progress': len(item.results), 'results': item.results if include_results else [],
-            'error': item.error, 'download_ready': bool(item.pdf), 'created_at': item.created_at.isoformat() + 'Z',
+            'error': item.error, 'download_ready': item.pdf_ready, 'created_at': item.created_at.isoformat() + 'Z',
             'whole_file': bool(original), 'stage': original.stage if original else item.status,
+            'output_layout': item.output.layout if item.output else 'legacy',
+            'latex_ready': item.pdf_ready and bool(item.output),
+            'warnings': item.output.warnings if item.output and include_results else [],
             'file': {'name': original.name, 'pages': original.pages, 'size': original.size} if original else None,
-            'submission_ready': item.status == 'completed' and bool(item.pdf)}
+            'submission_ready': item.status == 'completed' and item.pdf_ready}
 
 
 def ensure_ai():
@@ -345,13 +357,14 @@ async def preview_assignment(enrollment_id: str = Form(...), file: UploadFile = 
 @app.post('/api/assignments/upload')
 async def upload_assignment(enrollment_id: str = Form(...),
                             request_key: str = Form(..., min_length=16, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$'),
+                            output_layout: Literal['rebuild', 'new', 'legacy'] = Form('rebuild'),
                             file: UploadFile = File(...), user=Depends(current_user), db=Depends(get_db)):
     enrollment = owned_enrollment(db, user.id, enrollment_id)
     data = await read_upload(file)
     original_name = Path(file.filename or 'assignment.txt').name
     suffix = Path(original_name).suffix
     name = original_name if len(original_name) <= 180 else Path(original_name).stem[:180 - len(suffix)] + suffix
-    fingerprint = json.dumps(['whole-file-v1', enrollment_id, name, hashlib.sha256(data).hexdigest()])
+    fingerprint = json.dumps(['whole-file-v1', enrollment_id, name, hashlib.sha256(data).hexdigest()] + ([] if output_layout == 'legacy' else [output_layout]))
     previous = db.scalar(select(Usage).where(Usage.user_id == user.id, Usage.request_key == request_key))
     if previous:
         usage, _ = reserve(db, user, 1, request_key, 'assignment', fingerprint)
@@ -370,7 +383,10 @@ async def upload_assignment(enrollment_id: str = Form(...),
         raise HTTPException(413, 'Your beta upload allowance is 100 MB. Remove unused materials or assignments to make room.')
     mime, pages = await asyncio.to_thread(validate_assignment_file, original_name, data)
     snapshot = pipeline.available_sources(db, enrollment)
-    pipeline.check_assignment_sources(snapshot)
+    if output_layout == 'legacy':
+        pipeline.check_assignment_sources(snapshot)
+    elif sum(len(s['text']) for s in snapshot) > 400_000:
+        raise HTTPException(413, 'The course materials exceed the document context limit. Remove unused chapters and try again.')
     refresh_allowance(db, user)
     budget = min(settings.max_questions, user.credits + user.topup_credits)
     if not budget:
@@ -385,6 +401,8 @@ async def upload_assignment(enrollment_id: str = Form(...),
         item = Assignment(user_id=user.id, enrollment_id=enrollment_id, title=Path(name).stem[:180],
                           questions=[], source_snapshot=snapshot, usage_id=usage.id, status='queued')
         item.file = AssignmentFile(name=name, mime=mime, data=data, size=len(data), pages=pages, student_name=user.name)
+        if output_layout != 'legacy':
+            item.output = AssignmentOutput(layout=output_layout)
         db.add(item)
         db.commit()
         return assignment_dict(item)
@@ -417,7 +435,10 @@ def retry_assignment(assignment_id: str, body: AssignmentRetry, user=Depends(cur
     if db.scalar(select(func.count()).select_from(Assignment).where(Assignment.user_id == user.id, Assignment.status.in_(['queued', 'running']))) >= 2:
         raise HTTPException(429, 'You can queue up to two assignments at a time.')
     snapshot = pipeline.available_sources(db, db.get(Enrollment, item.enrollment_id))
-    pipeline.check_assignment_sources(snapshot)
+    if not item.output:
+        pipeline.check_assignment_sources(snapshot)
+    elif sum(len(s['text']) for s in snapshot) > 400_000:
+        raise HTTPException(413, 'The course materials exceed the document context limit. Remove unused chapters and try again.')
     old_usage = db.get(Usage, item.usage_id) if item.usage_id else None
     if old_usage and old_usage.status == 'reserved':
         settle(db, old_usage.id, 0, item.id, old_usage.input_tokens, old_usage.output_tokens)
@@ -507,13 +528,28 @@ def assignment(assignment_id: str, user=Depends(current_user), db=Depends(get_db
 
 
 @app.get('/api/assignments/{assignment_id}/download')
-def download_assignment(assignment_id: str, format: str = 'pdf', user=Depends(current_user), db=Depends(get_db)):
+def download_assignment(assignment_id: str, format: str = 'pdf', preview: bool = False, user=Depends(current_user), db=Depends(get_db)):
     item = db.scalar(select(Assignment).where(Assignment.id == assignment_id, Assignment.user_id == user.id))
     if not item or not item.pdf:
         raise HTTPException(404, 'The completed document is not ready yet.')
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '-', item.title)[:80] or 'assignment'
-    if format not in ('pdf', 'md', 'docx'):
-        raise HTTPException(422, 'Choose PDF, Markdown, or Word document format.')
+    if format not in ('pdf', 'md', 'docx', 'tex', 'latex'):
+        raise HTTPException(422, 'Choose PDF, Markdown, Word, or LaTeX format.')
+    if item.output:
+        if format == 'latex':
+            from .typesetting import latex_project
+            body = latex_project(item.output.latex, item.file.data if item.output.include_original else None)
+            return Response(body, media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="{safe_name}-latex.zip"'})
+        body, mime, extension = {
+            'pdf': (item.pdf, 'application/pdf', 'pdf'),
+            'md': (item.output.markdown, 'text/markdown', 'md'),
+            'tex': (item.output.latex, 'application/x-tex', 'tex'),
+            'docx': (item.output.docx, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx')
+        }[format]
+        disposition = 'inline' if format == 'pdf' and preview else 'attachment'
+        return Response(body, media_type=mime, headers={'Content-Disposition': f'{disposition}; filename="{safe_name}-submission.{extension}"'})
+    if format in ('tex', 'latex'):
+        raise HTTPException(422, 'Upload this assignment again to generate LaTeX output.')
     if item.file:
         from .documents import submission_markdown, submission_docx
         course = db.get(Course, db.get(Enrollment, item.enrollment_id).course_id)

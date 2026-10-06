@@ -15,6 +15,7 @@ class Settings:
     app_url: str = os.getenv('APP_URL', os.getenv('RENDER_EXTERNAL_URL', 'http://localhost:8000')).rstrip('/')
     ai_provider: str = os.getenv('AI_PROVIDER', 'gemini')
     ai_model: str = os.getenv('AI_MODEL', 'gemini-3.5-flash-lite')
+    assignment_model: str = os.getenv('AI_ASSIGNMENT_MODEL', 'gemini-3.8-flash' if os.getenv('AI_PROVIDER', 'gemini') == 'gemini' else os.getenv('AI_MODEL', 'gpt-5-mini'))
     gemini_key: str = os.getenv('GEMINI_API_KEY', '')
     openai_key: str = os.getenv('OPENAI_API_KEY', '')
     beta_enabled: bool = os.getenv('BETA_ENABLED', 'true').lower() == 'true'

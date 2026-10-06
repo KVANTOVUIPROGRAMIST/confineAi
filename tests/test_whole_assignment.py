@@ -236,7 +236,7 @@ def test_missing_or_oversize_evidence_is_never_silently_truncated(client, studen
 
 def upload(client, course, key='whole-assignment-request-01', data=None, name='homework-4.txt'):
     return client.post('/api/assignments/upload',
-                       data={'enrollment_id': course['id'], 'request_key': key},
+                       data={'enrollment_id': course['id'], 'request_key': key, 'output_layout': 'legacy'},
                        files={'file': (name, ASSIGNMENT_TEXT.encode() if data is None else data)})
 
 

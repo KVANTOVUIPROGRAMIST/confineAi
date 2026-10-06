@@ -9,6 +9,8 @@ from .db import SessionLocal
 from .documents import render_assignment, render_submission
 from .models import Assignment, Course, Enrollment, Usage
 from .pipeline import solve, solve_whole_assignment
+from .submissions import complete_assignment
+from .typesetting import render_completed
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +47,13 @@ def process_assignment(assignment_id):
                     usage.output_tokens += tokens[1]
                     db.commit()
                 stage('reading')
-                results, tokens = solve_whole_assignment(db, enrollment, assignment.file,
-                    assignment.source_snapshot, usage.monthly_reserved + usage.topup_reserved, on_stage=stage, on_tokens=record_tokens)
+                if assignment.output:
+                    results, warnings, tokens = complete_assignment(db, enrollment, assignment.file,
+                        assignment.source_snapshot, usage.monthly_reserved + usage.topup_reserved, on_stage=stage, on_tokens=record_tokens)
+                    assignment.output.warnings = warnings
+                else:
+                    results, tokens = solve_whole_assignment(db, enrollment, assignment.file,
+                        assignment.source_snapshot, usage.monthly_reserved + usage.topup_reserved, on_stage=stage, on_tokens=record_tokens)
                 input_tokens += tokens[0]
                 output_tokens += tokens[1]
                 usage.input_tokens, usage.output_tokens = input_tokens, output_tokens
@@ -54,7 +61,12 @@ def process_assignment(assignment_id):
                 assignment.results = results
                 assignment.questions = [r['question'] for r in results]
                 stage('rendering')
-                assignment.pdf = render_submission(assignment.title, course, results, assignment.file.student_name)
+                if assignment.output:
+                    rendered = render_completed(assignment.title, course, results, assignment.file.student_name,
+                                                assignment.output.layout, assignment.file)
+                    assignment.pdf, assignment.output.markdown, assignment.output.latex, assignment.output.docx, assignment.output.include_original = rendered
+                else:
+                    assignment.pdf = render_submission(assignment.title, course, results, assignment.file.student_name)
                 assignment.file.stage = 'done'
             else:
                 for index, question in enumerate(assignment.questions):
@@ -78,6 +90,10 @@ def process_assignment(assignment_id):
                 assignment.file.stage = 'failed'
                 assignment.pdf = None
                 assignment.results = []
+                if assignment.output:
+                    assignment.output.markdown = assignment.output.latex = ''
+                    assignment.output.docx = None
+                    assignment.output.warnings = []
                 db.refresh(usage)
                 input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
             assignment.error = exc.detail if isinstance(exc, HTTPException) else 'The assignment could not finish. Unused responses have been restored.'

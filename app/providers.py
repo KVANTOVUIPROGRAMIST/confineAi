@@ -64,7 +64,7 @@ def usage_tokens(usage, provider):
 
 
 def generate(schema, instructions, content, max_tokens=5000, attachment=None, thinking_level=None,
-             max_attempts=1, on_retry=None):
+             max_attempts=1, on_retry=None, model=None, timeout_seconds=None):
     """Bounded recovery from the same input; no browsing, retrieval or code tools."""
     if not settings.ai_ready:
         raise HTTPException(503, 'Live AI is not connected yet. Set GEMINI_API_KEY or OPENAI_API_KEY on the server. Your files and course setup still work.')
@@ -74,7 +74,12 @@ def generate(schema, instructions, content, max_tokens=5000, attachment=None, th
     attempts = max(1, min(2, max_attempts))
     for attempt in range(attempts):
         try:
-            result, tokens = generate_once(schema, instructions, content, max_tokens, attachment, thinking_level)
+            options = {}
+            if model:
+                options['model'] = model
+            if timeout_seconds:
+                options['timeout_seconds'] = timeout_seconds
+            result, tokens = generate_once(schema, instructions, content, max_tokens, attachment, thinking_level, **options)
             return result, (total[0] + tokens[0], total[1] + tokens[1])
         except ProviderFailure as exc:
             total[0] += exc.tokens[0]
@@ -91,23 +96,26 @@ def generate(schema, instructions, content, max_tokens=5000, attachment=None, th
             time.sleep(1)
 
 
-def generate_once(schema, instructions, content, max_tokens, attachment, thinking_level):
+def generate_once(schema, instructions, content, max_tokens, attachment, thinking_level, model=None, timeout_seconds=None):
+    model = model or settings.ai_model
     tokens = (0, 0)
     try:
         # Full-file reasoning can exceed the short tutoring timeout.
         timeout = 180 if attachment or thinking_level else 120
+        if timeout_seconds:
+            timeout = max(10, min(180, timeout_seconds))
         with httpx.Client(timeout=httpx.Timeout(timeout, connect=15)) as client:
             if settings.ai_provider == 'gemini':
                 generation_config = {'responseMimeType': 'application/json',
                                      'responseJsonSchema': gemini_schema(schema.model_json_schema()),
                                      'maxOutputTokens': max_tokens}
-                if thinking_level and settings.ai_model.startswith('gemini-3'):
+                if thinking_level and model.startswith('gemini-3'):
                     generation_config['thinkingConfig'] = {'thinkingLevel': thinking_level}
                 parts = [{'text': content}]
                 if attachment:
                     parts.append({'inlineData': {'mimeType': attachment[0], 'data': base64.b64encode(attachment[1]).decode()}})
                 response = client.post(
-                    f'https://generativelanguage.googleapis.com/v1beta/models/{settings.ai_model}:generateContent',
+                    f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
                     headers={'x-goog-api-key': settings.gemini_key},
                     json={'systemInstruction': {'parts': [{'text': instructions}]},
                           'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': generation_config})
@@ -136,7 +144,7 @@ def generate_once(schema, instructions, content, max_tokens, attachment, thinkin
                         parts.append({'type': 'input_image', 'image_url': f'data:{attachment[0]};base64,{encoded}'})
                 response = client.post('https://api.openai.com/v1/responses',
                     headers={'Authorization': 'Bearer ' + settings.openai_key},
-                    json={'model': settings.ai_model, 'store': False, 'instructions': instructions,
+                    json={'model': model, 'store': False, 'instructions': instructions,
                           'input': [{'role': 'user', 'content': parts}], 'max_output_tokens': max_tokens,
                           'text': {'format': {'type': 'json_schema', 'name': schema.__name__, 'strict': True, 'schema': schema.model_json_schema()}}})
                 response.raise_for_status()

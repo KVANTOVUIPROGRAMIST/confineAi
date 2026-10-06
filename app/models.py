@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, column_property
 
 from .db import Base
 
@@ -119,9 +119,23 @@ class Assignment(Base):
     status: Mapped[str] = mapped_column(String(20), default='draft')
     error: Mapped[str] = mapped_column(Text, default='')
     usage_id: Mapped[str | None] = mapped_column(ForeignKey('usage.id'), nullable=True)
-    pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    pdf_ready: Mapped[bool] = column_property(pdf.is_not(None))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     file: Mapped['AssignmentFile | None'] = relationship(cascade='all, delete-orphan', uselist=False)
+    output: Mapped['AssignmentOutput | None'] = relationship(cascade='all, delete-orphan', uselist=False)
+
+
+class AssignmentOutput(Base):
+    """Versioned output settings/artifacts; additive table leaves existing jobs intact."""
+    __tablename__ = 'assignment_outputs'
+    assignment_id: Mapped[str] = mapped_column(ForeignKey('assignments.id', ondelete='CASCADE'), primary_key=True)
+    layout: Mapped[str] = mapped_column(String(20), default='rebuild')
+    markdown: Mapped[str] = mapped_column(Text, default='', deferred=True)
+    latex: Mapped[str] = mapped_column(Text, default='', deferred=True)
+    docx: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    include_original: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AssignmentFile(Base):
