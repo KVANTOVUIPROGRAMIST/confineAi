@@ -14,12 +14,14 @@ from app.config import settings
 from app.db import SessionLocal
 from app.jobs import process_assignment
 from app.models import Assignment, Enrollment, Usage
+from app.document_layout import DocumentLayout, QuestionGroup, SourceRegion, source_crop
 from conftest import enroll
 
 
 def draft(solution=r'There are $\binom{3}{2}=3$ ways.'):
     return submissions.CompletedDocument(sections=[submissions.CompletedSection(label='1(a)', question='Choose two of three objects.',
-        solution=solution, source_ids=[], uses_diagram=False, assumptions=[])])
+        display_question='Choose two of three objects.', solution=solution, source_ids=[], uses_diagram=False, assumptions=[])],
+        layout=DocumentLayout(header='', preamble='', groups=[QuestionGroup(label='1.', context='', section_labels=['1(a)'])]))
 
 
 def check(correct=True, coverage=True):
@@ -56,6 +58,8 @@ def test_completion_without_course_materials_retains_answer_and_separate_note(cl
     assert results[0]['answer']['verification'] == 'general_knowledge'
     assert len(notes) == 1 and tokens == (30, 15)
     assert all(c[2]['model'] == settings.assignment_model and c[2]['thinking_level'] == 'high' for c in calls)
+    assert results[0]['document_layout']['groups'][0]['section_labels'] == ['1(a)']
+    assert calls[1][1]['proposed_layout']['groups'][0]['label'] == '1.'
 
 
 def test_correctness_repair_is_bounded_and_source_gap_does_not_trigger_repair(client, student, monkeypatch):
@@ -220,3 +224,120 @@ def test_compilation_failure_restores_credits_and_keeps_reported_ai_usage(client
     with SessionLocal() as db:
         usage = db.scalar(select(Usage).where(Usage.result_id == item['id']))
         assert usage.consumed == 0 and (usage.input_tokens, usage.output_tokens) == (30, 15)
+
+
+def test_grouped_document_preserves_header_points_context_and_answers_only_mode():
+    results = [
+        {'label': '2(a)', 'question': 'Shared context. Question a.', 'display_question': '(a) (4 points) Question a.',
+         'answer': {'final_answer': 'Answer a.'}},
+        {'label': '2(b)', 'question': 'Shared context. Question b.', 'display_question': '(4 points) Question b.',
+         'answer': {'final_answer': 'Answer b.'}},
+    ]
+    results[0]['document_layout'] = DocumentLayout(header='CSE 21 Fall 2026\n\nHomework 1\n\nDue Monday',
+        preamble='**Instructions**\n\nExplain each factor.',
+        groups=[QuestionGroup(label='2.', context='2. Shared context.', section_labels=['2(a)', '2(b)'])]).model_dump()
+    course = SimpleNamespace(code='CSE 21', title='Catalog title')
+    markdown = typesetting.markdown_document('WRONG FILE TITLE', course, results, 'Student')
+    assert 'WRONG FILE TITLE' not in markdown and 'Catalog title' not in markdown
+    assert markdown.count('Shared context.') == 1
+    assert markdown.count('(4 points)') == 2 and markdown.count('### (a)') == 1
+    assert markdown.index('Explain each factor.') < markdown.index('**2.**') < markdown.index('Question a.') < markdown.index('Answer a.')
+    new = typesetting.markdown_document('Solutions', course, results, '', 'new')
+    assert 'Shared context.' not in new and 'Due Monday' not in new and '2(a)' in new and 'Answer b.' in new
+
+
+def test_source_header_anchors_resolve_exact_crop_and_bad_anchors_use_transcription():
+    from reportlab.pdfgen import canvas
+    original = io.BytesIO()
+    writer = canvas.Canvas(original, pagesize=(612, 792))
+    writer.drawRightString(530, 720, 'CSE 21 Fall 2026')
+    writer.drawRightString(530, 700, 'Homework 1')
+    writer.drawString(80, 665, 'Instructions: explain each factor.')
+    writer.drawString(80, 600, '1. First question outside the header.')
+    writer.save()
+    # Intentionally wrong approximate coordinates: unique anchors own exact bounds.
+    region = SourceRegion(page=1, left=0, top=0, right=1000, bottom=1000,
+                          first_text='CSE 21 Fall 2026', last_text='explain each factor.')
+    crop = source_crop(original.getvalue(), region.model_dump(), header=True)
+    assert crop and crop['image'].startswith(b'\x89PNG')
+    left, bottom, right, top = crop['trim']
+    assert bottom > 640 and top > 50 and crop['height'] < 100
+    region.last_text = 'a nonexistent anchor'
+    assert source_crop(original.getvalue(), region.model_dump(), header=True) is None
+    region.page = 2
+    assert source_crop(original.getvalue(), region.model_dump()) is None
+    with pytest.raises(ValueError):
+        SourceRegion(page=1, left=500, top=10, right=400, bottom=20)
+
+
+def test_solution_spacing_preserves_equations_and_code():
+    solution = 'Base case: true. Induction hypothesis: assume $n=k$. Induction step: derive the result.\n\nThus $\\frac{n(3n+1)}{2}=\\frac{3n^2+n}{2}$.'
+    spaced = typesetting.solution_spacing(solution)
+    assert '\n\nInduction hypothesis:' in spaced and '\n\nInduction step:' in spaced
+    assert r'$$\frac{n(3n+1)}{2}=\frac{3n^2+n}{2}$$' in spaced
+    code = '```python\nprint("Base case: true. Induction step: literal")\n```'
+    assert typesetting.solution_spacing(code) == code
+    listed = '**Justification:**\n1. **Choose:** First step.\n2. **Arrange:** Second step.'
+    assert '**Justification:**\n\n1. ' in typesetting.solution_spacing(listed)
+    assert '\n\n2. **Arrange:**' in typesetting.solution_spacing(listed)
+
+
+def test_native_regions_are_inlined_in_word_and_latex_without_original_appendix(tmp_path, monkeypatch):
+    from PIL import Image
+    image = io.BytesIO()
+    Image.new('RGB', (300, 150), 'white').save(image, format='PNG')
+    crop = {'page': 1, 'trim': (70, 500, 70, 80), 'width': 472, 'height': 212, 'image': image.getvalue()}
+    monkeypatch.setattr(typesetting, 'source_crop', lambda *a, **k: crop)
+    compiled = []
+    monkeypatch.setattr(typesetting, 'compile_pdf', lambda tex, original: compiled.append((tex, original)) or b'%PDF')
+    region = SourceRegion(page=1, left=0, top=0, right=1000, bottom=400)
+    results = [{'label': '1(a)', 'question': 'A figure question.', 'display_question': '(4 points) A figure question.',
+                'figures': [region.model_dump()], 'uses_diagram': True, 'answer': {'final_answer': '$$x=1$$'},
+                'document_layout': DocumentLayout(header='Original title', preamble='Instructions', header_region=region,
+                    groups=[QuestionGroup(label='1.', context='', section_labels=['1(a)'])]).model_dump()}]
+    pdf, md, tex, docx, source_needed = typesetting.render_completed('Wrong title', SimpleNamespace(code='CSE 21', title='Course'),
+        results, 'Student', 'rebuild', SimpleNamespace(mime='application/pdf', data=b'original-source'))
+    assert source_needed and compiled[0][1] == b'original-source'
+    assert tex.count('includegraphics[') == 2 and 'includepdf' not in tex
+    assert 'Original title' in md and '(4 points)' in md and 'Wrong title' not in md
+    assert r'\Needspace' in tex
+    with zipfile.ZipFile(io.BytesIO(docx)) as archive:
+        assert b'CONFINE_SOURCE_REGION_' not in archive.read('word/document.xml')
+        assert b'CONFINE_BLOCK_ROLE_' not in archive.read('word/document.xml')
+        assert archive.read('word/document.xml').count(b'<pic:pic>') == 2
+        assert b'<m:oMath' in archive.read('word/document.xml')
+
+
+def test_figure_crop_snaps_to_native_graphic_and_excludes_neighboring_question():
+    from PIL import Image
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+    picture = io.BytesIO()
+    Image.new('RGB', (100, 100), 'navy').save(picture, format='PNG')
+    original = io.BytesIO()
+    writer = canvas.Canvas(original, pagesize=(612, 792))
+    writer.drawString(110, 435, 'Neighboring question must not be in the crop.')
+    writer.drawImage(ImageReader(picture), 118, 285, width=120, height=120)
+    writer.save()
+    region = SourceRegion(page=1, left=180, top=440, right=410, bottom=630)
+    crop = source_crop(original.getvalue(), region.model_dump())
+    assert crop and crop['height'] == pytest.approx(128, abs=1)
+    assert crop['trim'][1] == pytest.approx(281, abs=1)
+    assert crop['trim'][3] > 380
+
+
+def test_layout_with_missing_or_reordered_subparts_cannot_be_accepted(client, student, monkeypatch):
+    course = enroll(client)
+    monkeypatch.setattr(settings, 'gemini_key', 'fake-key')
+    malformed = draft()
+    malformed.layout.groups[0].section_labels = ['1(b)']
+    calls = []
+    def generate(schema, instructions, content, **kwargs):
+        calls.append(schema)
+        return (malformed if schema is submissions.CompletedDocument else check()), (10, 5)
+    monkeypatch.setattr(providers, 'generate', generate)
+    from fastapi import HTTPException
+    with SessionLocal() as db, pytest.raises(HTTPException, match='omitted or misread'):
+        submissions.complete_assignment(db, db.get(Enrollment, course['id']),
+            SimpleNamespace(name='hw.txt', mime='text/plain', data=b'Question a.', pages=1), [], 30)
+    assert calls == [submissions.CompletedDocument, submissions.DocumentCheck]*2

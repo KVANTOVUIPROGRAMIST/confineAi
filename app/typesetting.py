@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from pypdf import PdfReader, PdfWriter
 
 from .config import ROOT
+from .document_layout import source_crop, strip_question_label
 
 VERSION = '0.17.0'
 ASSETS = {
@@ -147,21 +148,77 @@ def validate_markdown(text):
     walk(tree)
 
 
-def markdown_document(title, course, results, student_name='', layout='rebuild'):
+def solution_spacing(text):
+    """Space proof stages and substantial final equations without changing their content."""
+    text = normalize_math(text)
+    # Keep program strings and mathematics opaque to prose formatting.
+    segments = re.split(r'(?ms)(^\s*```[^\n]*\n.*?^\s*```\s*$|^\s*~~~[^\n]*\n.*?^\s*~~~\s*$|`[^`\n]*`|\$\$.*?\$\$|(?<!\\)\$(?:\\.|[^$])*?\$)', text)
+    for index in range(0, len(segments), 2):
+        segments[index] = re.sub(r'(?<=[.!?:])\s+(?=(?:\*\*)?(?:Base case|Induction hypothesis|Inductive hypothesis|Induction step|Inductive step|Conclusion)\b)',
+                                 '\n\n', segments[index])
+        segments[index] = re.sub(r'\s+(?=\d{1,2}\.\s+\*\*)', '\n\n', segments[index])
+        segments[index] = re.sub(r'(?<!\n)\n(?=\s*[-*]\s+)', '\n\n', segments[index])
+    text = ''.join(segments)
+    # A long, terminal inline equation becomes display math. Leave code untouched.
+    def display(match):
+        formula = match.group(1)
+        if len(formula) >= 32 and ('=' in formula or '\\frac' in formula or '\\binom' in formula):
+            return '\n\n$$' + formula + '$$' + match.group(2) + '\n\n'
+        return match.group()
+    segments = re.split(r'(?ms)(^\s*```[^\n]*\n.*?^\s*```\s*$|^\s*~~~[^\n]*\n.*?^\s*~~~\s*$|`[^`\n]*`|\$\$.*?\$\$)', text)
+    for index in range(0, len(segments), 2):
+        segments[index] = re.sub(r'(?<![$\\])\$([^$\n]+)\$([.,]?)(?=\s*(?:\n\s*\n|$))', display, segments[index])
+    return ''.join(segments).strip()
+
+
+def document_blocks(title, course, results, student_name='', layout='rebuild'):
     def literal(value):
         return re.sub(r'([\\`*_{}\[\]<>#$!|])', r'\\\1', str(value).replace('\n', ' '))
-    lines = [f'# {literal(title)}', literal(f'{course.code} - {course.title}')]
+    blocks = []
+    metadata = results[0].get('document_layout') if results and layout == 'rebuild' else None
+    def add(text, role='text', region=None, owners=None):
+        blocks.append({'text': text, 'role': role, 'region': region, 'owners': owners or []})
+    if metadata and (metadata['header'].strip() or metadata['preamble'].strip()):
+        add(metadata['header'] + '\n\n' + metadata['preamble'], 'header', metadata.get('header_region'))
+    else:
+        add(f'# {literal(title)}\n\n' + literal(f'{course.code} - {course.title}'), 'header')
     if student_name:
-        lines.append(literal(student_name))
+        add('**' + literal(student_name) + '**')
+    if metadata:
+        indexed = {result['label']: result for result in results}
+        for group in metadata['groups']:
+            context = normalize_math(strip_question_label(group['context'], group['label']))
+            if context:
+                add('**' + literal(group['label']) + '** ' + context, 'group')
+            elif len(group['section_labels']) == 1 and not re.search(r'\([a-zA-Z0-9]+\)$', group['section_labels'][0]):
+                add('## ' + literal(group['label']), 'group')
+            for region in group.get('figures', []):
+                add('', 'figure', region, group['section_labels'])
+            for part_index, label in enumerate(group['section_labels']):
+                result = indexed[label]
+                part = re.search(r'(\([a-zA-Z0-9]+\))$', label)
+                if part:
+                    display_label = group['label'] + ' ' + part.group() if not context and part_index == 0 else part.group()
+                    add('### ' + literal(display_label), 'part')
+                question = strip_question_label(result.get('display_question', ''), label)
+                if question:
+                    add(normalize_math(question), 'question')
+                for region in result.get('figures', []):
+                    add('', 'figure', region, [label])
+                add('**Solution**\n\n' + solution_spacing(result['answer']['final_answer']), 'solution')
+        return blocks
     for result in results:
-        lines.append('## ' + literal(result['label']))
+        add('## ' + literal(result['label']), 'part')
         if layout == 'rebuild':
-            lines.append(normalize_math(result['question']))
+            add(normalize_math(result['question']), 'question')
             if result.get('uses_diagram'):
-                lines.append('*The original figure is reproduced in the assignment appendix.*')
-            lines.append('**Solution**')
-        lines.append(normalize_math(result['answer']['final_answer']))
-    return '\n\n'.join(lines) + '\n'
+                add('*The original figure is reproduced in the assignment appendix.*')
+        add(('**Solution**\n\n' if layout == 'rebuild' else '') + solution_spacing(result['answer']['final_answer']), 'solution')
+    return blocks
+
+
+def markdown_document(title, course, results, student_name='', layout='rebuild'):
+    return '\n\n'.join(b['text'] for b in document_blocks(title, course, results, student_name, layout) if b['text']) + '\n'
 
 
 PREAMBLE = r'''\documentclass[11pt,letterpaper]{article}
@@ -170,10 +227,22 @@ PREAMBLE = r'''\documentclass[11pt,letterpaper]{article}
 \usepackage{mathrsfs,cancel}
 \usepackage{longtable,booktabs,array}
 \usepackage{graphicx,pdfpages}
+\usepackage{needspace,microtype}
 \usepackage{fancyvrb}
 \usepackage[unicode,hidelinks]{hyperref}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt}
+\linespread{1.06}
+\setlength{\abovedisplayskip}{8pt}
+\setlength{\belowdisplayskip}{8pt}
+\clubpenalty=10000
+\widowpenalty=10000
+\displaywidowpenalty=10000
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{0pt}{12pt}{6pt}{\normalfont\normalsize\bfseries}}
+\renewcommand\subsection{\@startsection{subsection}{2}{0pt}{9pt}{4pt}{\normalfont\normalsize\bfseries}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{0pt}{9pt}{4pt}{\normalfont\normalsize\bfseries}}
+\makeatother
 \setlength{\emergencystretch}{3em}
 \setcounter{secnumdepth}{0}
 \providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
@@ -185,10 +254,41 @@ PREAMBLE = r'''\documentclass[11pt,letterpaper]{article}
 '''
 
 
-def latex_document(markdown, include_original=False):
+def latex_document(markdown, include_original=False, blocks=None):
     markdown = normalize_math(markdown)
     validate_markdown(markdown)
-    body = pandoc(markdown, 'latex', ['--syntax-highlighting=none', '--wrap=none'])
+    if blocks is None:
+        body = pandoc(markdown, 'latex', ['--syntax-highlighting=none', '--wrap=none'])
+    else:
+        rendered = []
+        for index, block in enumerate(blocks):
+            if block['role'] in ('group', 'part'):
+                # Reserve the prompt plus the beginning of its solution, without
+                # placing arbitrarily long proofs in unbreakable boxes.
+                prompt = []
+                for following in blocks[index+1:]:
+                    if following['role'] not in ('question', 'figure'):
+                        break
+                    prompt.append(following['text'])
+                figure_lines = 0
+                for following in blocks[index+1:]:
+                    if following['role'] not in ('question', 'figure'):
+                        break
+                    if following.get('crop'):
+                        figure = following['crop']
+                        scale = min(0.65, figure['width']/500) * 496.8 / figure['width']
+                        figure_lines += int(figure['height'] * scale / 13) + 2
+                lines = min(36, 8 + figure_lines + sum(len(t)//85 + t.count('$$')*2 + t.count('\n') for t in prompt))
+                rendered.append(f'\\Needspace{{{lines}\\baselineskip}}\n')
+            crop = block.get('crop')
+            if crop:
+                trim = ' '.join(f'{v:.3f}bp' for v in crop['trim'])
+                # All options are server-owned numbers; file name is constant.
+                width = r'\linewidth' if block['role'] == 'header' else f'{min(0.65, crop["width"]/500):.3f}\\linewidth'
+                rendered.append(f'\\par\\noindent\\includegraphics[page={crop["page"]},trim={{{trim}}},clip,width={width}]{{original.pdf}}\\par\n')
+            elif block['text']:
+                rendered.append(pandoc(block['text'], 'latex', ['--syntax-highlighting=none', '--wrap=none']))
+        body = '\n'.join(rendered)
     if include_original:
         body += r'\clearpage\includepdf[pages=-,pagecommand={\thispagestyle{empty}}]{original.pdf}' + '\n'
     return PREAMBLE + body + '\n\\end{document}\n'
@@ -242,20 +342,83 @@ print("ready")
 
 
 def render_completed(title, course, results, student_name, layout, original_file):
-    markdown = markdown_document(title, course, results, student_name, layout)
-    include_original = layout == 'rebuild' and original_file.mime == 'application/pdf' and any(r.get('uses_diagram') for r in results)
-    latex = latex_document(markdown, include_original)
+    blocks = document_blocks(title, course, results, student_name, layout)
+    is_pdf = layout == 'rebuild' and original_file.mime == 'application/pdf'
+    for block in blocks:
+        if is_pdf and block.get('region'):
+            block['crop'] = source_crop(original_file.data, block['region'], header=block['role'] == 'header')
+    # Retain source pages as a fallback only for graphics with no usable inline crop.
+    figured_labels = {label for b in blocks if b['role'] == 'figure' and b.get('crop') for label in b['owners']}
+    missing_figures = any(b['role'] == 'figure' and not b.get('crop') for b in blocks)
+    missing_figures |= any(r.get('uses_diagram') and r['label'] not in figured_labels for r in results)
+    appendix = is_pdf and missing_figures
+    if appendix and results[0].get('document_layout'):
+        blocks.append({'text': '*Original figures are reproduced in the assignment appendix.*', 'role': 'text'})
+    markdown = '\n\n'.join(b['text'] for b in blocks if b['text']) + '\n'
+    include_original = appendix or any(b.get('crop') for b in blocks)
+    latex = latex_document(markdown, appendix, blocks)
     pdf = compile_pdf(latex, original_file.data if include_original else None)
     with tempfile.TemporaryDirectory(prefix='confine-word-') as directory:
         path = Path(directory) / 'submission.docx'
+        word_blocks, images, roles = [], {}, {}
+        for index, block in enumerate(blocks):
+            boundary = f'CONFINE_BLOCK_ROLE_{index}'
+            roles[boundary] = block['role']
+            word_blocks.append(boundary)
+            if block.get('crop'):
+                marker = f'CONFINE_SOURCE_REGION_{index}'
+                images[marker] = block
+                word_blocks.append(marker)
+            elif block['text']:
+                word_blocks.append(block['text'])
         # Pandoc creates native Word equations (OMML), preserving editable mathematics.
-        pandoc(markdown, 'docx', ['--standalone'], str(path))
-        if include_original:
+        pandoc('\n\n'.join(word_blocks), 'docx', ['--standalone'], str(path))
+        format_word(path, images, roles)
+        if appendix:
             append_word_figures(path, original_file.data)
         docx = path.read_bytes()
         if len(docx) > 20_000_000:
             raise TypesetError('The Word document exceeds the output limit. Use a smaller assignment file.')
     return pdf, markdown, latex, docx, include_original
+
+
+def format_word(path, images, roles=None):
+    from docx import Document
+    from docx.shared import Inches, Pt
+    document = Document(path)
+    section = document.sections[0]
+    section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = Inches(0.8)
+    section.page_width, section.page_height = Inches(8.5), Inches(11)
+    normal = document.styles['Normal']
+    normal.font.name, normal.font.size = 'Cambria', Pt(11)
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing = 1.06
+    for name in ('Heading 1', 'Heading 2', 'Heading 3'):
+        style = document.styles[name]
+        style.font.name, style.font.size, style.font.bold = 'Cambria', Pt(11), True
+        style.paragraph_format.space_before, style.paragraph_format.space_after = Pt(10), Pt(4)
+        style.paragraph_format.keep_with_next = True
+    in_question = False
+    for paragraph in document.paragraphs:
+        if paragraph.text.strip() in (roles or {}):
+            in_question = roles[paragraph.text.strip()] in ('group', 'part', 'question', 'figure')
+            paragraph._element.getparent().remove(paragraph._element)
+            continue
+        if paragraph.style.name.startswith('Heading'):
+            in_question = True
+        if paragraph.text.strip() == 'Solution':
+            in_question = False
+            paragraph.paragraph_format.keep_with_next = True
+        elif in_question:
+            paragraph.paragraph_format.keep_with_next = True
+        paragraph.paragraph_format.widow_control = True
+        if paragraph.text.strip() in images:
+            block = images[paragraph.text.strip()]
+            crop = block['crop']
+            paragraph.clear()
+            width = 6.9 if block['role'] == 'header' else min(4.5, crop['width']/72)
+            paragraph.add_run().add_picture(io.BytesIO(crop['image']), width=Inches(width))
+    document.save(path)
 
 
 def append_word_figures(path, original):
