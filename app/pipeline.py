@@ -201,7 +201,9 @@ def solve_whole_assignment(db, enrollment, file, source_snapshot, budget, on_sta
     total_tokens = [0, 0]
 
     def generate(schema, prompt, payload, max_tokens):
-        result, tokens = providers.generate(schema, prompt, json.dumps(payload), max_tokens=max_tokens, attachment=attachment)
+        result, tokens = providers.generate(schema, prompt, json.dumps(payload), max_tokens=max_tokens,
+                                            attachment=attachment,
+                                            thinking_level='high' if schema is WholeVerification else 'medium')
         total_tokens[0] += tokens[0]
         total_tokens[1] += tokens[1]
         if on_tokens:
@@ -225,13 +227,13 @@ Coverage and answer support are SEPARATE checks. Set coverage_complete=true when
 Return EXACTLY one sections item for every proposed section; COPY its provided index field verbatim. These indexes are zero-based document identities, not the original homework question numbers or subpart labels. Check EVERY substantive claim, formula, method, example, code dependency, calculation, quote, and assumption in summary, steps, and especially the complete final_answer. Verify each cited passage supports the work and that final_answer contains the requested complete answer/working, not a terse result requiring hidden steps. Prerequisites cannot introduce an unsupported advanced method. Course descriptions and problem statements provide scope/data, not new method evidence. Equivalent algebra, arithmetic, and applying a documented method to supplied values are allowed. Do not assume outside knowledge, fabricate table entries, or accept unperformed experiments/executions. Check assignment-required citation/format/length restrictions. If uncertain, supported=false with specific concerns. This is a best-effort semantic check.
 coverage_complete concerns should explain missing or misread tasks. Section concerns should explain unsupported or incomplete solutions. Concerns must be empty when the corresponding coverage_complete/supported flag is true; do not put success commentary in concerns. needs_materials sections always have supported=false."""
     review = generate(WholeVerification, review_instructions,
-        {**context, 'proposed_sections': indexed_sections(results)}, 7000)
+        {**context, 'proposed_sections': indexed_sections(results)}, 12000)
     # One bounded recovery; no extraction pass and no weakening of the final checks.
     if not review_indexes_match(review, len(results)):
         if on_stage:
             on_stage('repairing')
         review = generate(WholeVerification, review_instructions + '\nThe previous review returned missing, duplicate, or incorrect indexes. Re-audit the original file and return exactly the supplied index values, once each.',
-            {**context, 'proposed_sections': indexed_sections(results)}, 7000)
+            {**context, 'proposed_sections': indexed_sections(results)}, 12000)
     elif not review.coverage_complete or review.concerns:
         if on_stage:
             on_stage('repairing')
@@ -241,7 +243,7 @@ coverage_complete concerns should explain missing or misread tasks. Section conc
         if on_stage:
             on_stage('checking')
         review = generate(WholeVerification, review_instructions,
-            {**context, 'proposed_sections': indexed_sections(results)}, 7000)
+            {**context, 'proposed_sections': indexed_sections(results)}, 12000)
     if not review_indexes_match(review, len(results)):
         raise HTTPException(502, 'The answer check did not return feedback for every section, even after an automatic retry. No response allowance was consumed. Please retry the original file; it does not need to be split or transcribed.')
     if not review.coverage_complete or review.concerns:

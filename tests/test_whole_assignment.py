@@ -634,3 +634,30 @@ def test_gemini_transport_simplifies_schema_but_locally_enforces_whole_document_
     attachment = requests[0]['contents'][0]['parts'][1]['inlineData']
     assert attachment['mimeType'] == 'application/pdf'
     assert base64.b64decode(attachment['data']) == data
+
+
+@pytest.mark.parametrize('model', ['gemini-3.5-flash-lite', 'gemini-2.5-pro'])
+def test_assignment_reasoning_is_sent_only_to_compatible_gemini_models(monkeypatch, model):
+    monkeypatch.setattr(settings, 'gemini_key', 'fake-test-key')
+    monkeypatch.setattr(settings, 'ai_provider', 'gemini')
+    monkeypatch.setattr(settings, 'ai_model', model)
+    requests = []
+    original_client = httpx.Client
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, request=request, json={
+            'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': whole_review().model_dump_json()}]}}],
+            'usageMetadata': {'promptTokenCount': 100, 'candidatesTokenCount': 50, 'thoughtsTokenCount': 600},
+        })
+
+    monkeypatch.setattr(providers.httpx, 'Client',
+        lambda *args, **kwargs: original_client(*args, transport=httpx.MockTransport(respond), **kwargs))
+    review, tokens = providers.generate(WholeVerification, 'Check the complete document.', 'Document data.',
+        max_tokens=12000, thinking_level='high')
+    assert review.coverage_complete and tokens == (100, 650)
+    config = requests[0]['generationConfig']
+    if model.startswith('gemini-3'):
+        assert config['thinkingConfig'] == {'thinkingLevel': 'high'}
+    else:
+        assert 'thinkingConfig' not in config

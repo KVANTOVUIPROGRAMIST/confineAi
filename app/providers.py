@@ -17,7 +17,7 @@ def gemini_schema(node):
     return node
 
 
-def generate(schema, instructions, content, max_tokens=5000, attachment=None):
+def generate(schema, instructions, content, max_tokens=5000, attachment=None, thinking_level=None):
     """No browsing tools, URL context, code execution, or external retrieval are enabled."""
     if not settings.ai_ready:
         raise HTTPException(503, 'Live AI is not connected yet. Set GEMINI_API_KEY or OPENAI_API_KEY on the server. Your files and course setup still work.')
@@ -27,6 +27,11 @@ def generate(schema, instructions, content, max_tokens=5000, attachment=None):
     try:
         with httpx.Client(timeout=httpx.Timeout(120, connect=15)) as client:
             if settings.ai_provider == 'gemini':
+                generation_config = {'responseMimeType': 'application/json',
+                                     'responseJsonSchema': gemini_schema(json_schema),
+                                     'maxOutputTokens': max_tokens}
+                if thinking_level and settings.ai_model.startswith('gemini-3'):
+                    generation_config['thinkingConfig'] = {'thinkingLevel': thinking_level}
                 parts = [{'text': content}]
                 if attachment:
                     parts.append({'inlineData': {'mimeType': attachment[0], 'data': base64.b64encode(attachment[1]).decode()}})
@@ -35,8 +40,7 @@ def generate(schema, instructions, content, max_tokens=5000, attachment=None):
                     headers={'x-goog-api-key': settings.gemini_key},
                     json={'systemInstruction': {'parts': [{'text': instructions}]},
                           'contents': [{'role': 'user', 'parts': parts}],
-                          'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': gemini_schema(json_schema),
-                                               'maxOutputTokens': max_tokens}})
+                          'generationConfig': generation_config})
                 response.raise_for_status()
                 data = response.json()
                 candidates = data.get('candidates', [])

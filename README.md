@@ -44,6 +44,8 @@ Restart the server after changing environment variables. Model availability can 
 
 For OpenAI, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and an appropriate `AI_MODEL` (for example `gpt-6-luna`). Both adapters request structured JSON and omit web/search/code tools. Assignment generation and review send the original file and all approved course evidence (up to 400,000 evidence characters; oversize sets are rejected, never silently truncated). Tutoring sends selected source passages and the student's question. Course-material scan/image uploads still use transcription; assignment files bypass it.
 
+Gemini 3 assignment requests explicitly use medium reasoning for drafts and high reasoning for reviews. Review requests allow up to 12,000 output/thinking tokens to reduce truncation during a full-file audit. This increases provider usage and latency compared with the Flash-Lite model's default reasoning, without adding student response charges for checks or repairs. Other Gemini versions and the OpenAI adapter retain their provider defaults. See [Google's thinking configuration](https://ai.google.dev/gemini-api/docs/generate-content/thinking).
+
 ## Deploy to Render
 
 1. Push this repository to a GitHub or GitLab repository you control.
