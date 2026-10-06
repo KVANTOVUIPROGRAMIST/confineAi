@@ -58,7 +58,7 @@ Whole-file provider calls allow one automatic retry for a timeout, interrupted c
 5. Deploy. Render's `RENDER_EXTERNAL_URL` supplies the public origin automatically. For a custom domain, set `APP_URL=https://your-domain` and redeploy.
 6. Create an account at the deployed URL and select your classes.
 
-Do not run multiple web workers or instances in this version: one process owns assignment queue recovery and the in-memory rate limiter. Allow queued and running assignments to finish before deploying changes; this beta recovery strategy assumes the previous worker has stopped. PostgreSQL protects credit balances and payment fulfillment transactionally. Before scaling to thousands of concurrent users, move job ownership and rate limiting into a dedicated queue/shared store and benchmark real workloads.
+Keep one steady web worker/instance because the rate limiter is in memory. Assignment owners have a 90-second renewable database lease, refreshed every 15 seconds. Deployment overlap preserves live ownership; expired or unleased interrupted jobs return to the queue. Every result/token/artifact commit checks and locks its ownership row, fencing retired workers from resumed jobs. Interrupted provider calls can still incur owner costs. PostgreSQL protects credit balances and payment fulfillment transactionally. Before scaling to thousands of concurrent users, move jobs and rate limiting into a dedicated queue/shared store and benchmark real workloads.
 
 ## Test your courses
 

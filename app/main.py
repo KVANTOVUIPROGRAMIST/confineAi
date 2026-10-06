@@ -22,7 +22,7 @@ from .credits import month_key, refresh_allowance, reserve, settle
 from .db import Base, SessionLocal, engine, get_db
 from .documents import extract_file, extract_questions
 from .assignment_files import validate_assignment_file
-from .jobs import assignment_worker, recover_reservations
+from .jobs import assignment_worker, recover_jobs, recover_reservations
 from .models import Assignment, AssignmentFile, AssignmentOutput, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
 from .schemas import AssignmentDraft, AssignmentRetry, AssignmentRun, AuthInput, ChatInput, EnrollmentInput
 
@@ -32,9 +32,11 @@ async def lifespan(app):
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
         seed_catalog(db)
+        from .qa_cleanup import cleanup_abandoned_verification
+        cleanup_abandoned_verification(db)
         db.execute(delete(LoginSession).where(LoginSession.expires_at < utcnow()))
-        # One app process owns the durable queue. Resume interrupted assignments without dropping results.
-        db.execute(update(Assignment).where(Assignment.status == 'running').values(status='queued'))
+        # Respect live owners during Render's overlapping deployment handoff.
+        recover_jobs(db)
         db.commit()
         orphaned = db.scalars(select(Usage).where(Usage.status == 'reserved', Usage.operation == 'chat')).all()
         for usage in orphaned:

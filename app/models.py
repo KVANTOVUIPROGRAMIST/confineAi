@@ -126,6 +126,13 @@ class Assignment(Base):
     output: Mapped['AssignmentOutput | None'] = relationship(cascade='all, delete-orphan', uselist=False)
 
 
+class AssignmentLease(Base):
+    __tablename__ = 'assignment_leases'
+    assignment_id: Mapped[str] = mapped_column(ForeignKey('assignments.id', ondelete='CASCADE'), primary_key=True)
+    owner: Mapped[str] = mapped_column(String(32))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class AssignmentOutput(Base):
     """Versioned output settings/artifacts; additive table leaves existing jobs intact."""
     __tablename__ = 'assignment_outputs'
