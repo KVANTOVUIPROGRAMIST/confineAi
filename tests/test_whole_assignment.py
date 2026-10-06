@@ -161,7 +161,9 @@ def test_positive_coverage_flag_with_missing_task_concern_fails_and_tracks_spent
     with pytest.raises(HTTPException) as error:
         solve_file(course, text_file(), on_tokens=recorded_tokens.append)
     assert error.value.status_code == 502
-    assert recorded_tokens == [(100, 50), (120, 20)]
+    assert recorded_tokens == [(100, 50), (120, 20), (100, 50), (120, 20)]
+    assert 'required final subpart' in error.value.detail
+    assert 'clearer file' not in error.value.detail
 
 
 def test_positive_support_flag_with_substantive_concern_still_withholds_section(client, student, monkeypatch):
@@ -440,7 +442,120 @@ def test_failed_whole_file_jobs_never_expose_a_completed_document_and_restore_re
     with SessionLocal() as db:
         usage = db.scalar(select(Usage).where(Usage.result_id == item['id']))
         assert usage.status == 'refunded' and usage.consumed == 0
-        assert (usage.input_tokens, usage.output_tokens) == ((0, 0) if failure == 'provider' else (220, 70))
+        expected = (0, 0) if failure == 'provider' else (440, 140) if failure == 'coverage' else (220, 70)
+        assert (usage.input_tokens, usage.output_tokens) == expected
+
+
+def recovery_model(monkeypatch, first_draft, first_review, repaired_draft=None, final_review=None):
+    calls = []
+    drafts = iter([first_draft, repaired_draft or first_draft])
+    reviews = iter([first_review, final_review or whole_review()])
+    def generate(schema, instructions, content, **kwargs):
+        calls.append({'schema': schema, 'instructions': instructions, 'context': json.loads(content), **kwargs})
+        if schema is WholeAssignment:
+            return next(drafts), (100, 50)
+        if schema is WholeVerification:
+            return next(reviews), (120, 20)
+        raise AssertionError('No question extraction is permitted during recovery.')
+    monkeypatch.setattr(providers, 'generate', generate)
+    return calls
+
+
+def test_missing_subpart_is_automatically_repaired_from_original_file(client, student, monkeypatch):
+    course = enroll(client)
+    incomplete = whole_draft()
+    incomplete.sections = incomplete.sections[:1]
+    missing_subpart = WholeVerification(coverage_complete=False, concerns=['4(b) is omitted.'],
+        sections=[SectionVerification(index=0, supported=True, concerns=[])])
+    calls = recovery_model(monkeypatch, incomplete, missing_subpart, repaired_draft=whole_draft())
+    data = scanned_pdf()
+    file = SimpleNamespace(name='original.pdf', mime='application/pdf', pages=2, data=data)
+    stages = []
+    results, tokens = solve_file(course, file, on_stage=stages.append)
+    assert [r['label'] for r in results] == ['4(a)', '4(b)']
+    assert all(r['answer']['verification'] == 'checked' for r in results)
+    assert [c['schema'] for c in calls] == [WholeAssignment, WholeVerification, WholeAssignment, WholeVerification]
+    assert all(c['attachment'] == ('application/pdf', data) for c in calls)
+    assert all(c['context']['approved_evidence'] == calls[0]['context']['approved_evidence'] for c in calls)
+    assert calls[2]['context']['coverage_feedback']['concerns'] == ['4(b) is omitted.']
+    assert [s['index'] for s in calls[3]['context']['proposed_sections']] == [0, 1]
+    assert tokens == (440, 140)
+    assert stages == ['checking', 'repairing', 'checking']
+
+
+def test_repaired_job_charges_only_final_supported_sections_once(client, student, monkeypatch):
+    monkeypatch.setattr(settings, 'gemini_key', 'fake-test-key')
+    incomplete = whole_draft()
+    incomplete.sections = incomplete.sections[:1]
+    review = WholeVerification(coverage_complete=False, concerns=['4(b) is omitted.'],
+        sections=[SectionVerification(index=0, supported=True, concerns=[])])
+    recovery_model(monkeypatch, incomplete, review, repaired_draft=whole_draft())
+    course = enroll(client)
+    item = upload(client, course).json()
+    process_queued(item)
+    result = client.get('/api/assignments/' + item['id']).json()
+    assert result['status'] == 'completed' and result['submission_ready']
+    assert client.get('/api/auth/me').json()['credits'] == 298
+    with SessionLocal() as db:
+        usage = db.scalar(select(Usage).where(Usage.result_id == item['id']))
+        assert usage.consumed == 2 and (usage.input_tokens, usage.output_tokens) == (440, 140)
+
+
+def test_wrong_review_indexes_retry_review_without_rewriting_answers(client, student, monkeypatch):
+    course = enroll(client)
+    bad = whole_review(sections=[SectionVerification(index=1, supported=True, concerns=[]),
+                                 SectionVerification(index=2, supported=True, concerns=[])])
+    calls = recovery_model(monkeypatch, whole_draft(), bad)
+    results, tokens = solve_file(course, text_file())
+    assert len(results) == 2 and all(r['answer']['verification'] == 'checked' for r in results)
+    assert [c['schema'] for c in calls] == [WholeAssignment, WholeVerification, WholeVerification]
+    assert calls[1]['context']['proposed_sections'] == calls[2]['context']['proposed_sections']
+    assert tokens == (340, 90)
+
+
+def test_repair_does_not_turn_missing_course_support_into_supported_answers(client, student, monkeypatch):
+    course = enroll(client)
+    incomplete = whole_draft()
+    incomplete.sections = incomplete.sections[:1]
+    repaired = whole_draft()
+    repaired.sections[1].answer = Answer(status='needs_materials', summary='4(b) requires an absent course method.',
+        steps=[], final_answer='', concepts=[], source_ids=[])
+    first = WholeVerification(coverage_complete=False, concerns=['4(b) is missing.'],
+        sections=[SectionVerification(index=0, supported=True, concerns=[])])
+    final = whole_review(sections=[SectionVerification(index=0, supported=True, concerns=[]),
+                                  SectionVerification(index=1, supported=False, concerns=['Missing course method.'])])
+    recovery_model(monkeypatch, incomplete, first, repaired_draft=repaired, final_review=final)
+    results, _ = solve_file(course, text_file())
+    assert [r['answer']['status'] for r in results] == ['answered', 'needs_materials']
+    assert results[1]['answer']['final_answer'] == ''
+
+
+def test_repair_that_still_omits_task_fails_with_specific_feedback(client, student, monkeypatch):
+    course = enroll(client)
+    review = whole_review(coverage_complete=False)
+    review.concerns = ['4(b) still omits the shared experiment data.']
+    calls = recovery_model(monkeypatch, whole_draft(), review, final_review=review)
+    with pytest.raises(HTTPException) as error:
+        solve_file(course, text_file())
+    assert '4(b)' in error.value.detail and 'shared experiment' in error.value.detail
+    assert len(calls) == 4
+
+
+def test_fifteen_subparts_remain_present_after_coverage_repair(client, student, monkeypatch):
+    course = enroll(client)
+    labels = ['1(a)', '1(b)'] + [f'{n}({letter})' for n in (2, 3) for letter in 'abcde'] + ['4(a)', '4(b)', '4(c)']
+    complete = WholeAssignment(sections=[AssignmentSection(label=label,
+        question=f'{label}: apply the documented binomial method to this case.', answer=whole_draft().sections[0].answer)
+        for label in labels])
+    incomplete = complete.model_copy(deep=True)
+    incomplete.sections.pop()
+    first = WholeVerification(coverage_complete=False, concerns=['4(c) was omitted on page 2.'],
+        sections=[SectionVerification(index=i, supported=True, concerns=[]) for i in range(14)])
+    final = WholeVerification(coverage_complete=True, concerns=[],
+        sections=[SectionVerification(index=i, supported=True, concerns=[]) for i in range(15)])
+    recovery_model(monkeypatch, incomplete, first, repaired_draft=complete, final_review=final)
+    results, _ = solve_file(course, text_file())
+    assert [r['label'] for r in results] == labels
 
 
 @pytest.mark.parametrize('count', [0, 2, 31])

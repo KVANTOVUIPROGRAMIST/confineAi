@@ -114,7 +114,7 @@ function sourcesPanel(enrollment) {
 }
 
 function assignmentStage(assignment) {
-  const labels={queued:'Waiting to start',reading:'Reading the whole assignment and writing answers',checking:'Checking coverage and approved course sources',rendering:'Formatting your document',done:'Document ready'};
+  const labels={queued:'Waiting to start',reading:'Reading the whole assignment and writing answers',checking:'Checking coverage and approved course sources',repairing:'Rechecking the original file and restoring missing tasks',rendering:'Formatting your document',done:'Document ready'};
   return labels[assignment.stage] || (assignment.status==='queued'?'Waiting to start':'Working on your assignment');
 }
 function assignmentStatus(assignment) {
