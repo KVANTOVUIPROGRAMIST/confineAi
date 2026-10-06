@@ -69,7 +69,7 @@ def _normalized(value):
     return ''.join(c for c in unicodedata.normalize('NFKC', value).casefold() if c.isalnum())
 
 
-def source_crop(original, region, header=False):
+def source_crop(original, region, header=False, first_question=''):
     """Resolve a crop against the actual uploaded PDF, not approximate OCR geometry.
 
     Headers require uniquely matched text anchors. A failed match uses the full
@@ -100,9 +100,21 @@ def source_crop(original, region, header=False):
                             indices.extend([index] * len(normalized))
                         plain = ''.join(characters)
                         first, last = _normalized(region.first_text), _normalized(region.last_text)
-                        if len(first) < 8 or len(last) < 8 or plain.count(first) != 1 or plain.count(last) != 1:
+                        if len(first) < 8 or plain.count(first) != 1:
                             return None
-                        start, stop = plain.index(first), plain.index(last) + len(last)
+                        start = plain.index(first)
+                        question = _normalized(first_question)
+                        # The model's end anchor can omit a trailing note. Locate
+                        # the first displayed prompt instead, solely for cropping.
+                        boundary = next((plain.index(question[:size]) for size in (100, 80, 60, 40, 24)
+                                         if len(question) >= size and plain.count(question[:size]) == 1
+                                         and plain.index(question[:size]) > start), None)
+                        if boundary is not None:
+                            stop = boundary
+                        elif len(last) >= 8 and plain.count(last) == 1:
+                            stop = plain.index(last) + len(last)
+                        else:
+                            return None
                         if start >= stop:
                             return None
                         boxes = [text.get_charbox(i) for i in range(indices[start], indices[stop-1]+1)
@@ -112,6 +124,9 @@ def source_crop(original, region, header=False):
                         # Include nearby rules around instruction panels.
                         x0, x1 = max(0, x0-3), min(width, x1+3)
                         y0, y1 = max(0, y0-3), min(height, y1+3)
+                        if boundary is not None:
+                            # Never let padding reveal a fragment of the question.
+                            y0 = max(y0, text.get_charbox(indices[boundary])[3] + 2)
                     finally:
                         text.close()
                 else:

@@ -192,8 +192,11 @@ def document_blocks(title, course, results, student_name='', layout='rebuild'):
                 add('**' + literal(group['label']) + '** ' + context, 'group')
             elif len(group['section_labels']) == 1 and not re.search(r'\([a-zA-Z0-9]+\)$', group['section_labels'][0]):
                 add('## ' + literal(group['label']), 'group')
-            for region in group.get('figures', []):
-                add('', 'figure', region, group['section_labels'])
+            diagram_sections = [label for label in group['section_labels'] if indexed[label].get('uses_diagram')]
+            single_figure_owner = diagram_sections[0] if len(diagram_sections) == 1 else None
+            if not single_figure_owner:
+                for region in group.get('figures', []):
+                    add('', 'figure', region, group['section_labels'])
             for part_index, label in enumerate(group['section_labels']):
                 result = indexed[label]
                 part = re.search(r'(\([a-zA-Z0-9]+\))$', label)
@@ -205,6 +208,9 @@ def document_blocks(title, course, results, student_name='', layout='rebuild'):
                     add(normalize_math(question), 'question')
                 for region in result.get('figures', []):
                     add('', 'figure', region, [label])
+                if label == single_figure_owner:
+                    for region in group.get('figures', []):
+                        add('', 'figure', region, [label])
                 add('**Solution**\n\n' + solution_spacing(result['answer']['final_answer']), 'solution')
         return blocks
     for result in results:
@@ -265,15 +271,16 @@ def latex_document(markdown, include_original=False, blocks=None):
             if block['role'] in ('group', 'part'):
                 # Reserve the prompt plus the beginning of its solution, without
                 # placing arbitrarily long proofs in unbreakable boxes.
-                prompt = []
+                prompt = [block['text']] if block['role'] == 'group' else []
+                figure_lines, passed_part = 0, False
                 for following in blocks[index+1:]:
+                    if block['role'] == 'group' and following['role'] == 'part' and not passed_part:
+                        passed_part = True
+                        prompt.append(following['text'])
+                        continue
                     if following['role'] not in ('question', 'figure'):
                         break
                     prompt.append(following['text'])
-                figure_lines = 0
-                for following in blocks[index+1:]:
-                    if following['role'] not in ('question', 'figure'):
-                        break
                     if following.get('crop'):
                         figure = following['crop']
                         scale = min(0.65, figure['width']/500) * 496.8 / figure['width']
@@ -344,9 +351,19 @@ print("ready")
 def render_completed(title, course, results, student_name, layout, original_file):
     blocks = document_blocks(title, course, results, student_name, layout)
     is_pdf = layout == 'rebuild' and original_file.mime == 'application/pdf'
+    metadata = results[0].get('document_layout') if results else None
+    first_prompt = ''
+    if metadata and metadata['groups']:
+        group = metadata['groups'][0]
+        if group['context'].strip():
+            first_prompt = group['label'] + ' ' + strip_question_label(group['context'], group['label'])
+        else:
+            first = results[0]
+            first_prompt = first['label'] + ' ' + strip_question_label(first.get('display_question') or first['question'], first['label'])
     for block in blocks:
         if is_pdf and block.get('region'):
-            block['crop'] = source_crop(original_file.data, block['region'], header=block['role'] == 'header')
+            block['crop'] = source_crop(original_file.data, block['region'], header=block['role'] == 'header',
+                                        first_question=first_prompt if block['role'] == 'header' else '')
     # Retain source pages as a fallback only for graphics with no usable inline crop.
     figured_labels = {label for b in blocks if b['role'] == 'figure' and b.get('crop') for label in b['owners']}
     missing_figures = any(b['role'] == 'figure' and not b.get('crop') for b in blocks)

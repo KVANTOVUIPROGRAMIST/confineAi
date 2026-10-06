@@ -326,6 +326,35 @@ def test_figure_crop_snaps_to_native_graphic_and_excludes_neighboring_question()
     assert crop['trim'][3] > 380
 
 
+def test_header_includes_trailing_notes_when_model_end_anchor_stops_early():
+    from reportlab.pdfgen import canvas
+    original = io.BytesIO()
+    writer = canvas.Canvas(original, pagesize=(612, 792))
+    writer.drawString(80, 720, 'Course Fall 2026')
+    writer.drawString(80, 665, 'Key Concepts: induction and counting.')
+    writer.drawString(80, 645, 'Preliminary note: explain every factor in your answer.')
+    writer.drawString(80, 615, '1. (a) (6 points) Use regular induction to prove the identity.')
+    writer.save()
+    region = SourceRegion(page=1, left=0, top=0, right=1000, bottom=300,
+        first_text='Course Fall 2026', last_text='Key Concepts: induction and counting.')
+    crop = source_crop(original.getvalue(), region.model_dump(), header=True,
+        first_question='1(a) (6 points) Use regular induction to prove the identity.')
+    assert crop and crop['height'] > 90
+    assert 625 < crop['trim'][1] < 645
+
+
+def test_single_subpart_diagram_is_placed_with_that_subpart_not_parent_introduction():
+    region = SourceRegion(page=1, left=100, top=300, right=400, bottom=500)
+    results = [{'label': f'4({part})', 'question': f'Question {part}.', 'display_question': f'Question {part}.',
+                'uses_diagram': part == 'b', 'answer': {'final_answer': f'Answer {part}.'}} for part in 'abc']
+    results[0]['document_layout'] = DocumentLayout(header='Homework', preamble='', groups=[QuestionGroup(
+        label='4.', context='Include justification.', section_labels=['4(a)', '4(b)', '4(c)'], figures=[region])]).model_dump()
+    blocks = typesetting.document_blocks('Filename', SimpleNamespace(code='CSE 21', title='Course'), results)
+    picture = next(i for i, b in enumerate(blocks) if b['role'] == 'figure')
+    assert blocks[picture-1]['text'] == 'Question b.'
+    assert blocks[picture+1]['text'].endswith('Answer b.')
+
+
 def test_layout_with_missing_or_reordered_subparts_cannot_be_accepted(client, student, monkeypatch):
     course = enroll(client)
     monkeypatch.setattr(settings, 'gemini_key', 'fake-key')
