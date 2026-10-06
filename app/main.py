@@ -32,8 +32,6 @@ async def lifespan(app):
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
         seed_catalog(db)
-        from .qa_cleanup import cleanup_abandoned_verification
-        cleanup_abandoned_verification(db)
         db.execute(delete(LoginSession).where(LoginSession.expires_at < utcnow()))
         # Respect live owners during Render's overlapping deployment handoff.
         recover_jobs(db)
