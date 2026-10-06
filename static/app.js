@@ -114,7 +114,7 @@ function sourcesPanel(enrollment) {
 }
 
 function assignmentStage(assignment) {
-  const labels={queued:'Waiting to start',reading:'Reading the whole assignment and writing answers',checking:'Checking coverage and approved course sources',repairing:'Rechecking the original file and restoring missing tasks',rendering:'Formatting your document',done:'Document ready'};
+  const labels={queued:'Waiting to start',reading:'Reading the whole assignment and writing answers',checking:'Checking coverage and approved course sources',retrying:'Retrying this step from your saved original file',repairing:'Rechecking the original file and restoring missing tasks',rendering:'Formatting your document',done:'Document ready'};
   return labels[assignment.stage] || (assignment.status==='queued'?'Waiting to start':'Working on your assignment');
 }
 function assignmentStatus(assignment) {
@@ -251,6 +251,7 @@ function assignmentModal(assignment) {
   const incomplete=whole&&!assignment.submission_ready&&!running;
   const body=draft?`<div class="notice amber">${icon('info')}<div>This draft uses the earlier question preview. Its original file was not saved. Reupload the assignment from the Assignments page to use whole-file generation, or continue editing this saved draft below.</div></div><div id="question-editors">${assignment.questions.map((q,i)=>questionEditor(q,i)).join('')}</div><button class="text-button spaced" data-action="add-question">${icon('plus')}Add a question</button><p class="file-note">Up to 30 questions. Each supported question uses one response; missing evidence restores that response. Your available balance: ${(state.user?.credits||0)+(state.user?.topup_credits||0)}.</p>${!state.config.ai_ready?'<div class="notice amber spaced">Connect the server’s AI API key to generate solutions. This draft has been saved.</div>':''}`:`
     ${assignment.error?`<div class="notice amber">${escape(assignment.error)}</div>`:''}
+    ${whole&&assignment.status==='failed'?`<p class="file-note">Your original file is saved. Retry uses that file and your currently approved course materials.</p><button class="btn spaced" data-action="retry-assignment" ${!state.config.ai_ready?'disabled':''}>Retry saved file ${icon('arrow')}</button>`:''}
     ${running?`<div class="notice" role="status"><span class="spinner"></span><div>${whole?escape(assignmentStage(assignment)):`${assignment.progress}/${assignment.questions.length} questions processed`}.<br/>You can close this window; work continues.</div></div>`:''}
     ${whole&&!running&&assignment.status!=='failed'?`<div class="notice ${incomplete?'amber':''}">${icon(incomplete?'info':'check')}<div>${incomplete?'This draft is incomplete and is not ready to submit. Add the missing course materials and generate a new document.':'Your formatted document is ready to review. Check answers and formatting before submitting.'}</div></div>`:''}
     ${assignment.results.map((r,i)=>`<section class="assignment-result"><h3>${escape(r.label||`Question ${i+1}`)}</h3>${whole?`<details class="assignment-prompt"><summary>Assignment prompt</summary><p class="long-copy">${escape(r.question)}</p></details>${assignmentAnswerHTML(r.answer)}`:`<div class="long-copy">${escape(r.question)}</div>${answerHTML(r.answer)}`}</section>`).join('')||`<p class="muted">${running?'Answers will appear after the full assignment has been read and checked.':'No completed answers yet.'}</p>`}`;
@@ -334,6 +335,12 @@ document.addEventListener('click', async event=>{
       if(questions.some(q=>!q))throw new Error('Fill in each question or remove empty questions.');
       const result=await post('/assignments/'+state.modal.assignment.id+'/run',{questions,request_key:key()});
       await loadWorkspace();await refreshUser();render();assignmentModal(result);toast('Assignment queued. You can leave this window open or come back later.');
+    }
+    if(action==='retry-assignment'){
+      const modal=state.modal;
+      modal.retryKey ||= key();
+      const result=await post('/assignments/'+modal.assignment.id+'/retry',{request_key:modal.retryKey});
+      await loadWorkspace();await refreshUser();render();assignmentModal(result);toast('Retry queued using your saved original file.');
     }
     if(action==='delete-assignment'){
       showModal('Delete this assignment?','This also removes its saved solution file.','<p class="long-copy">Deleting a document does not restore responses already used to generate supported answers.</p>',`<button class="btn secondary" data-action="close-modal">Keep it</button><button class="btn danger" data-action="confirm-delete-assignment" data-id="${button.dataset.id}">Delete assignment</button>`);

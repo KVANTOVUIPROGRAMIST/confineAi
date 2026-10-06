@@ -46,6 +46,8 @@ For OpenAI, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and an appropriate `AI_M
 
 Gemini 3 assignment requests explicitly use medium reasoning for drafts and high reasoning for reviews. Review requests allow up to 12,000 output/thinking tokens to reduce truncation during a full-file audit. This increases provider usage and latency compared with the Flash-Lite model's default reasoning, without adding student response charges for checks or repairs. Other Gemini versions and the OpenAI adapter retain their provider defaults. See [Google's thinking configuration](https://ai.google.dev/gemini-api/docs/generate-content/thinking).
 
+Whole-file provider calls allow one automatic retry for a timeout, interrupted connection, temporary outage, empty response, or malformed/schema-invalid JSON. An output-limit retry doubles the response budget up to 48,000 tokens; full-file calls allow 180 seconds per network read. Each retry receives the same original file and approved context, never a partial continuation or relaxed schema. Reported usage from unsuccessful attempts is retained; students are charged only for final supported answer sections. Provider logs contain fixed failure codes, schema names, and numeric token counts, never response bodies, course passages, or credentials. Refusals, API configuration failures, and rate/billing limits stop without automatic retry. A stopped whole-file assignment can be retried from its saved private file with current approved course materials, without duplicating uploads. Idempotent request keys and a conditional queue update prevent duplicate retries and reservations.
+
 ## Deploy to Render
 
 1. Push this repository to a GitHub or GitLab repository you control.

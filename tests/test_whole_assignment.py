@@ -382,6 +382,86 @@ def process_queued(item):
     process_assignment(item['id'])
 
 
+def failed_upload(client, student, monkeypatch):
+    monkeypatch.setattr(settings, 'gemini_key', 'fake-test-key')
+    course = enroll(client)
+    item = upload(client, course).json()
+    with SessionLocal() as db:
+        assignment = db.get(Assignment, item['id'])
+        assignment.status = 'failed'
+        assignment.file.stage = 'failed'
+        assignment.error = 'Synthetic invalid response.'
+        db.commit()
+        settle(db, assignment.usage_id, 0, assignment.id)
+    return course, item
+
+
+def test_retry_reuses_saved_original_idempotently_and_only_final_answers_use_credits(client, student, monkeypatch):
+    course, item = failed_upload(client, student, monkeypatch)
+    mock_whole_model(monkeypatch)
+    endpoint = '/api/assignments/' + item['id'] + '/retry'
+    payload = {'request_key': 'retry-saved-original-001'}
+    first = client.post(endpoint, json=payload)
+    assert first.status_code == 200 and first.json()['status'] == 'queued'
+    assert first.json()['stage'] == 'queued' and not first.json()['error']
+    assert client.get('/api/auth/me').json()['credits'] == 270
+    repeated = client.post(endpoint, json=payload)
+    duplicate_click = client.post(endpoint, json={'request_key': 'retry-saved-original-002'})
+    assert repeated.json()['id'] == duplicate_click.json()['id'] == item['id']
+    assert client.get('/api/auth/me').json()['credits'] == 270
+    with SessionLocal() as db:
+        assert len(db.scalars(select(AssignmentFile)).all()) == 1
+        assert db.get(AssignmentFile, item['id']).data == ASSIGNMENT_TEXT.encode()
+        assert len(db.scalars(select(Usage)).all()) == 2
+    process_queued(first.json())
+    assert client.get('/api/auth/me').json()['credits'] == 298
+    assert client.post(endpoint, json=payload).json()['status'] == 'completed'
+    assert client.post(endpoint, json={'request_key': 'retry-saved-original-003'}).status_code == 409
+    assert client.get('/api/auth/me').json()['credits'] == 298
+
+
+def test_retry_enforces_ownership_csrf_and_current_course_evidence(client, student, monkeypatch):
+    course, item = failed_upload(client, student, monkeypatch)
+    endpoint = '/api/assignments/' + item['id'] + '/retry'
+    payload = {'request_key': 'retry-saved-original-001'}
+    csrf = client.headers.pop('X-CSRF-Token')
+    assert client.post(endpoint, json=payload).status_code == 403
+    client.headers['X-CSRF-Token'] = csrf
+    client.put('/api/courses/' + course['id'], json={'course_id': 'ucsd-math-183', 'mode': 'strict'})
+    assert client.post(endpoint, json=payload).status_code == 422
+    assert client.get('/api/auth/me').json()['credits'] == 300
+    client.post('/api/materials', data={'enrollment_id': course['id']},
+        files={'file': ('new-class-notes.txt', b'New permitted class method: E[X] = n*p for the binomial distribution.')})
+    assert client.post(endpoint, json=payload).status_code == 200
+    with SessionLocal() as db:
+        snapshot = db.get(Assignment, item['id']).source_snapshot
+        assert len(snapshot) == 1 and snapshot[0]['origin'] == 'upload'
+        assert 'New permitted class method' in snapshot[0]['text']
+    register(client, 'another-student@example.test')
+    assert client.post(endpoint, json=payload).status_code == 404
+
+
+def test_reported_usage_from_invalid_model_responses_is_kept_while_student_is_refunded(client, student, monkeypatch):
+    monkeypatch.setattr(settings, 'gemini_key', 'fake-test-key')
+    def invalid(*args, **kwargs):
+        raise providers.ProviderFailure('output_limit', 'Response truncated after automatic recovery.', tokens=(100, 12000))
+    monkeypatch.setattr(providers, 'generate', invalid)
+    item = upload(client, enroll(client)).json()
+    process_queued(item)
+    assert client.get('/api/auth/me').json()['credits'] == 300
+    with SessionLocal() as db:
+        usage = db.get(Usage, db.get(Assignment, item['id']).usage_id)
+        assert usage.status == 'refunded' and usage.consumed == 0
+        assert (usage.input_tokens, usage.output_tokens) == (100, 12000)
+
+
+def test_retry_cannot_use_original_upload_request_key(client, student, monkeypatch):
+    _, item = failed_upload(client, student, monkeypatch)
+    response = client.post('/api/assignments/' + item['id'] + '/retry', json={'request_key': 'whole-assignment-request-01'})
+    assert response.status_code == 409
+    assert client.get('/api/auth/me').json()['credits'] == 300
+
+
 def test_whole_file_job_finishes_clean_exports_and_settles_supported_sections(client, student, monkeypatch):
     monkeypatch.setattr(settings, 'gemini_key', 'fake-test-key')
     mock_whole_model(monkeypatch)

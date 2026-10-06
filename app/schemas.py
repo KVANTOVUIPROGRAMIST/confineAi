@@ -83,3 +83,7 @@ class AssignmentDraft(BaseModel):
 
 class AssignmentRun(AssignmentDraft):
     request_key: str = Field(min_length=16, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
+class AssignmentRetry(StrictModel):
+    request_key: str = Field(min_length=16, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')

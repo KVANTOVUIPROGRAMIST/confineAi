@@ -201,9 +201,22 @@ def solve_whole_assignment(db, enrollment, file, source_snapshot, budget, on_sta
     total_tokens = [0, 0]
 
     def generate(schema, prompt, payload, max_tokens):
-        result, tokens = providers.generate(schema, prompt, json.dumps(payload), max_tokens=max_tokens,
-                                            attachment=attachment,
-                                            thinking_level='high' if schema is WholeVerification else 'medium')
+        retried = False
+        def retrying():
+            nonlocal retried
+            retried = True
+            if on_stage:
+                on_stage('retrying')
+        try:
+            result, tokens = providers.generate(schema, prompt, json.dumps(payload), max_tokens=max_tokens,
+                attachment=attachment, thinking_level='high' if schema is WholeVerification else 'medium',
+                max_attempts=2, on_retry=retrying)
+        except providers.ProviderFailure as exc:
+            if on_tokens:
+                on_tokens(exc.tokens)
+            raise
+        if retried and on_stage:
+            on_stage('checking' if schema is WholeVerification else 'reading')
         total_tokens[0] += tokens[0]
         total_tokens[1] += tokens[1]
         if on_tokens:

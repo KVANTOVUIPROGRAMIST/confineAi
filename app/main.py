@@ -23,7 +23,7 @@ from .documents import extract_file, extract_questions
 from .assignment_files import validate_assignment_file
 from .jobs import assignment_worker, recover_reservations
 from .models import Assignment, AssignmentFile, Chat, Course, Document, Enrollment, LoginSession, Usage, User, utcnow
-from .schemas import AssignmentDraft, AssignmentRun, AuthInput, ChatInput, EnrollmentInput
+from .schemas import AssignmentDraft, AssignmentRetry, AssignmentRun, AuthInput, ChatInput, EnrollmentInput
 
 
 @asynccontextmanager
@@ -387,6 +387,59 @@ async def upload_assignment(enrollment_id: str = Form(...),
         item.file = AssignmentFile(name=name, mime=mime, data=data, size=len(data), pages=pages, student_name=user.name)
         db.add(item)
         db.commit()
+        return assignment_dict(item)
+    except Exception:
+        db.rollback()
+        settle(db, usage.id, 0)
+        raise
+
+
+@app.post('/api/assignments/{assignment_id}/retry')
+def retry_assignment(assignment_id: str, body: AssignmentRetry, user=Depends(current_user), db=Depends(get_db)):
+    item = db.scalar(select(Assignment).where(Assignment.id == assignment_id, Assignment.user_id == user.id))
+    if not item:
+        raise HTTPException(404, 'Assignment not found.')
+    if not item.file:
+        raise HTTPException(422, 'The original file was not saved for this older assignment. Please upload it again.')
+    fingerprint = json.dumps(['retry-whole-file-v1', item.id])
+    previous = db.scalar(select(Usage).where(Usage.user_id == user.id, Usage.request_key == body.request_key))
+    if previous:
+        usage, _ = reserve(db, user, 1, body.request_key, 'assignment', fingerprint)
+        if item.usage_id == usage.id or usage.result_id == item.id:
+            return assignment_dict(item)
+        raise HTTPException(409, 'This retry request was already refunded or interrupted. Please try again.')
+    if item.status in ('queued', 'running'):
+        return assignment_dict(item)
+    if item.status != 'failed':
+        raise HTTPException(409, 'Only stopped assignments can be retried.')
+    ensure_ai()
+    limiter.check('ai:' + user.id, 10)
+    if db.scalar(select(func.count()).select_from(Assignment).where(Assignment.user_id == user.id, Assignment.status.in_(['queued', 'running']))) >= 2:
+        raise HTTPException(429, 'You can queue up to two assignments at a time.')
+    snapshot = pipeline.available_sources(db, db.get(Enrollment, item.enrollment_id))
+    pipeline.check_assignment_sources(snapshot)
+    old_usage = db.get(Usage, item.usage_id) if item.usage_id else None
+    if old_usage and old_usage.status == 'reserved':
+        settle(db, old_usage.id, 0, item.id, old_usage.input_tokens, old_usage.output_tokens)
+    refresh_allowance(db, user)
+    db.refresh(user)
+    budget = min(settings.max_questions, user.credits + user.topup_credits)
+    if not budget:
+        raise HTTPException(402, 'You have reached your response allowance. Your usage page shows when it resets.')
+    usage, fresh = reserve(db, user, budget, body.request_key, 'assignment', fingerprint)
+    if not fresh:
+        db.refresh(item)
+        return assignment_dict(item)
+    try:
+        # Reuse the private original without duplicating uploads. Only one concurrent retry wins.
+        changed = db.execute(update(Assignment).where(Assignment.id == item.id, Assignment.status == 'failed').values(
+            usage_id=usage.id, status='queued', error='', questions=[], results=[], pdf=None, source_snapshot=snapshot))
+        if changed.rowcount:
+            db.execute(update(AssignmentFile).where(AssignmentFile.assignment_id == item.id).values(stage='queued'))
+        db.commit()
+        if not changed.rowcount:
+            settle(db, usage.id, 0)
+        db.refresh(item)
         return assignment_dict(item)
     except Exception:
         db.rollback()
